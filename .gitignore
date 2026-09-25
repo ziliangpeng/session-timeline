@@ -7,3 +7,17 @@ build/
 .pytest_cache/
 trace.json
 .DS_Store
+
+# secrets / local env — never commit machine configuration
+.env
+.env.*
+
+# logs
+*.log
+
+# ANY real session data or generated artifacts — never committed, no exceptions
+*.db
+/detail/
+experimental/sess_*.json
+experimental/app.html
+experimental/timelines.html
