@@ -11,6 +11,13 @@ class SpanKind(str, Enum):
     TOOL = "tool"
     IDLE = "idle"  # waiting for the user — first-class, never folded into other kinds
     SUBAGENT = "subagent"
+    GAP = "gap"  # long unattributed gap (session dormant / harness-driven silence)
+
+
+# Silence longer than this between attributed events is "the session was left
+# open / dormant", not inference. 5 minutes fits human-pace conversation turns;
+# slower agents may want it larger.
+GAP_CAP_S = 300.0
 
 
 @dataclass

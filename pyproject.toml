@@ -13,9 +13,13 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+web = ["fastapi>=0.110", "uvicorn>=0.29"]
 
 [project.scripts]
 session-timeline = "session_timeline.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+session_timeline = ["web/app_shell.html"]

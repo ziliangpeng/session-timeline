@@ -7,3 +7,17 @@ build/
 .pytest_cache/
 trace.json
 .DS_Store
+
+# secrets / local env — never commit machine configuration
+.env
+.env.*
+
+# logs and generated artifacts
+*.log
+
+# prototype playground — real session data, never committed
+/experimental/
+
+# server cache / generated shards, if a backend ever writes them
+/detail/
+*.db
