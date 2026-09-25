@@ -17,7 +17,7 @@ trace.json
 
 # ANY real session data or generated artifacts — never committed, no exceptions
 *.db
-/detail/
+detail/
 experimental/sess_*.json
 experimental/app.html
 experimental/timelines.html
