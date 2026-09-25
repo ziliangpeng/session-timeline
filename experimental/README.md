@@ -33,3 +33,4 @@ cd experimental && pytest test_web_scan.py
 - **No real session data in git.** `sess_*.json`, generated HTML, `detail/`,
   logs, and any `*.db` are gitignored. If a real artifact is needed for
   debugging, keep it in `/tmp/` — it never enters the tree (AGENTS.md #1).
+# protection smoke test
