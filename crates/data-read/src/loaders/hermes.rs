@@ -349,3 +349,63 @@ pub fn scan_all_stats(home: &Path, t0: f64, t1: f64, stats: &crate::ScanStats) -
         .flatten()
         .collect()
 }
+
+/// Load ONE session (full spans) by its raw session id from a profile DB,
+/// ignoring any time window. Returns None when the id is unknown.
+pub fn load_session_by_id(home: &Path, profile: &str, sid: &str) -> Option<Session> {
+    // Profile identity comes from the CALLER (same source of truth as the
+    // scan path: discover_profile_dbs); never guessed from the db path.
+    let db_path = if profile == "default" {
+        home.join("state.db")
+    } else {
+        home.join("profiles").join(profile).join("state.db")
+    };
+
+    let conn = Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let row: Option<(Option<String>, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT title, parent_session_id, source FROM sessions WHERE id = ?1 AND archived = 0",
+            [sid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok();
+    let (title, parent, source) = row?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT role, tool_name, tool_call_id, tool_calls, content, timestamp, platform_message_id
+             FROM messages WHERE session_id = ?1 AND active = 1
+             ORDER BY COALESCE(display_order, id)",
+        )
+        .ok()?;
+    let msgs: Vec<MsgRow> = stmt
+        .query_map([sid], |r| {
+            Ok(MsgRow {
+                role: r.get(0)?,
+                tool_name: r.get(1)?,
+                tool_call_id: r.get(2)?,
+                tool_calls: r.get(3)?,
+                content: r.get(4)?,
+                ts: r.get(5)?,
+                pmid: r.get(6)?,
+            })
+        })
+        .ok()?
+        .filter_map(|r| r.ok())
+        .collect();
+    if msgs.is_empty() {
+        return None;
+    }
+    build_session(
+        profile,
+        sid,
+        title,
+        parent,
+        source,
+        &msgs,
+        &crate::ScanStats::default(),
+    )
+}

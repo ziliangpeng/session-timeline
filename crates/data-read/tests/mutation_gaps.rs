@@ -6,7 +6,7 @@ mod fixtures;
 
 use data_read::model::SpanKind;
 use data_read::{scan, scan_stats, ScanStats, Sources};
-use fixtures::{hermes_home, prime_dir, sess_row, write_jsonl, T0, T1};
+use fixtures::{hermes_home, msg_row, prime_dir, sess_row, write_db, write_jsonl, T0, T1};
 
 fn srcs(home: &std::path::Path) -> Sources {
     Sources {
@@ -346,4 +346,30 @@ fn cli_human_output_counts_sub_sessions() {
         stdout.contains("1 prime files"),
         "prime file count printed: {stdout}"
     );
+}
+
+#[test]
+fn by_id_profile_matches_scan_profile() {
+    // regression: /api/session once returned hermes:hermes:hs1 (profile guessed
+    // from the db parent dir) while the index said hermes:default:hs1. The
+    // by-id load MUST return the same id the scan path produced.
+    use data_read::{scan_stats, ScanStats, Sources};
+    let home = hermes_home("byid-profile");
+    write_db(
+        &home.join("state.db"),
+        &[sess_row("s1", Some("t"), None, Some("tui"), 100.0, 200.0)],
+        &[
+            msg_row(1, "user", "hi", 100.0, None, None, None),
+            msg_row(2, "assistant", "yo", 150.0, None, None, None),
+        ],
+    );
+    let sources = Sources {
+        hermes_home: home.clone(),
+        prime_dir: None,
+    };
+    let scanned = scan_stats(&sources, 0.0, 1e9_f64, &ScanStats::default());
+    assert_eq!(scanned.len(), 1);
+    let by_id = data_read::load_session_by_id(&sources, &scanned[0].id)
+        .expect("by-id load must succeed for a scanned id");
+    assert_eq!(by_id.id, scanned[0].id, "by-id id must equal scanned id");
 }

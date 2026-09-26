@@ -131,3 +131,32 @@ pub fn scan_reported(sources: &Sources, t0: f64, t1: f64) -> ScanReport {
         stats,
     }
 }
+
+/// Load one full session by its unified id (`hermes:<profile>:<sid>` or
+/// `prime:<stem>`). Reads only the sources that could own the id — O(1)-ish
+/// on the interval-index pattern (spec/architecture.md ruling 3).
+pub fn load_session_by_id(sources: &Sources, id: &str) -> Option<model::Session> {
+    if let Some(rest) = id.strip_prefix("hermes:") {
+        let (profile, sid) = rest.split_once(':')?;
+        let home = &sources.hermes_home;
+        if !home.join("state.db").is_file()
+            && !home
+                .join("profiles")
+                .join(profile)
+                .join("state.db")
+                .is_file()
+        {
+            return None;
+        }
+        return loaders::hermes::load_session_by_id(home, profile, sid);
+    }
+    if let Some(stem) = id.strip_prefix("prime:") {
+        let dir = sources.prime_dir.as_ref()?;
+        let f = dir.join(format!("{stem}.jsonl"));
+        if !f.is_file() {
+            return None;
+        }
+        return loaders::prime::load_file_by_stem(&f);
+    }
+    None
+}

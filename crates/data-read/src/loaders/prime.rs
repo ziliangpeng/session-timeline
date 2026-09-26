@@ -363,3 +363,8 @@ fn load_file(f: &Path, t0: f64, t1: f64) -> Option<Session> {
         spans,
     })
 }
+
+/// Load ONE session by file stem (no window filter). None if unreadable/empty.
+pub fn load_file_by_stem(f: &Path) -> Option<Session> {
+    load_file(f, f64::NEG_INFINITY, f64::INFINITY)
+}
