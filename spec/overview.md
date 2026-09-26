@@ -95,33 +95,34 @@ silence longer than the gap cap        = IDLE (long silence), never inference
 
 ## Open questions
 
-### Q1 — How strict is "no pre-pull"? (needs a ruling)
+### Q1 — Caching and prefetch strategy (ruling: cache is fine; details to iterate)
 
-Scanning every DB on every request is seconds-slow (a full window scan took
-13–24s in the prototype). The prototype compromise: a TTL snapshot cache
-(rebuild in background every ~120s, requests always serve the current snapshot
-instantly, nothing persisted to disk, no scheduled jobs). Is a short-lived
-in-memory cache acceptable under "on-demand, no pre-pull", or must every
-request hit the DBs directly (and we invest in per-DB incremental queries /
-narrower time windows to make that fast)?
+Cache and in-memory prefetch are acceptable. Staleness of a few minutes is not
+a problem. **No temp files** — cache lives in memory only.
 
-### Q2 — Where exactly is the loader seam?
+Open sub-questions to resolve by iteration (measure first, decide later):
+- How much data actually needs to be resident? Can the server answer month/day
+  listings from a small index, and pull a given day's sessions only when that
+  day is clicked? What is that speed/size tradeoff?
+- Does anything need to be pulled at startup, or can everything be lazy?
+- The prototype's answer (full-window snapshot, ~120s TTL background rebuild)
+  is one data point; alternatives (per-day lazy load, per-profile lazily) get
+  measured against it once real numbers exist.
 
-Candidate A: loader = "give me all sessions overlapping [t0, t1]" (whole
-session objects, one shot). Candidate B: loader = finer-grained query interface
-(sessions index separately from span detail), letting the server ask for a
-day's detail without materializing everything. The prototype shipped A with a
-server-side index/detail split on top. Is the split part of the unified schema
-contract, or a server-internal optimization that loaders don't know about?
+### Q2 — Loader interface granularity
 
-### Q3 — Unified schema: required fields and their meaning
+Needs a dedicated spec doc (`loader-interface.md`); too detailed for the
+overview. The overview only fixes: loaders are the single harness-specific
+seam, they emit the unified session schema, and everything above them is
+harness-agnostic.
 
-Current shape: `id, title, profile, source (tui/cli/cron/…), kind (human/sub),
-t_start, t_end, spans[]`. Grills: is `title` required (Prime has no title —
-prototype derives one from the first user message)? Should `kind` classification
-(human vs subagent) be a loader responsibility or a server rule? Do we need
-`profile` as a first-class field (Hermes-specific concept) or a generic
-"origin" string?
+### Q3 — Schema fields (ruling: start loose and simple)
+
+The unified schema starts minimal; iterate as real needs appear. `title` is
+OPTIONAL — a harness that has no titles (Prime) simply omits it; the server/UI
+degrade gracefully (derive a display label lazily if needed). Field-by-field
+semantics get settled in `data-model.md` over time. Principle: always start
+with something simple.
 
 ### Q4 — Detail payload boundaries
 
