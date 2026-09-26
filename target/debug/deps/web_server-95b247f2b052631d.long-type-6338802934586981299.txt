@@ -1,0 +1,2 @@
+fn(axum::extract::State<AppState>, Query<DayParams>) -> impl Future<Output = Response<Body>> {api_day}
+fn(axum::extract::State<AppState>, Query<DayParams>) -> impl Future<Output = Response<Body>> {api_day}: Handler<_, _>

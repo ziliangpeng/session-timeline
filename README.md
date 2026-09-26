@@ -32,6 +32,7 @@ v0 skeleton — design settled (see AGENTS.md), converters not yet implemented.
 ## Repo layout
 
 ```
-src/session_timeline/   package code (span model, converters, renderers)
+crates/data-read/      Rust loader (unified model, loaders, CLI)
+crates/web-server/     Rust axum server (API + embedded UI)
 tests/                  pytest suite
 ```

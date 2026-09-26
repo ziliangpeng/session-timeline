@@ -1,0 +1,2 @@
+fn(axum::extract::State<AppState>, Query<SessionParams>) -> impl Future<Output = Response<Body>> {api_session}
+fn(axum::extract::State<AppState>, Query<SessionParams>) -> impl Future<Output = Response<Body>> {api_session}: Handler<_, _>

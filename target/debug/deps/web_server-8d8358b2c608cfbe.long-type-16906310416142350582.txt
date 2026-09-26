@@ -1,0 +1,2 @@
+fn(axum::extract::State<Sources>, Query<DayParams>) -> impl Future<Output = Result<Json<Value>, (StatusCode, std::string::String)>> {api_day}
+fn(axum::extract::State<Sources>, Query<DayParams>) -> impl Future<Output = Result<Json<Value>, (StatusCode, std::string::String)>> {api_day}: Handler<_, _>
