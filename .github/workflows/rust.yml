@@ -12,6 +12,9 @@ on:
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "pyproject.toml"
+      - "src/**"
+      - "experimental/**"
       - ".github/workflows/rust.yml"
   push:
     branches: [main]
