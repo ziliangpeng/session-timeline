@@ -1,0 +1,39 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>session-timeline</title>
+<style>body{font-family:system-ui;margin:2rem}button{margin:2px}</style></head>
+<body>
+<h1>session-timeline</h1>
+<div id="app">loading…</div>
+<script>
+// minimal shell: month/day nav + timeline rows (ported incrementally from the
+// validated prototype UI; kept deliberately small for v1)
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function load() {
+  const r = await fetch('/api/index?days=31');
+  const j = await r.json();
+  const byDay = {};
+  for (const s of j.sessions) for (const d of s.days) (byDay[d] ||= []).push(s);
+  const ds = Object.keys(byDay).sort().reverse();
+  const latest = ds[0];
+  document.getElementById('app').innerHTML =
+    ds.map(d => `<p><button onclick="show('${d}')">${d} (${byDay[d].length})</button></p>`).join('') +
+    (latest ? '<div id="day"></div>' : '<p>no sessions in window</p>');
+  if (latest) show(latest);
+}
+async function show(d) {
+  const r = await fetch('/api/day?date=' + d);
+  const j = await r.json();
+  const t0 = new Date(d + 'T00:00:00').getTime() / 1000;
+  document.getElementById('day').innerHTML = '<h2>' + esc(d) + '</h2>' +
+    j.sessions.map(s => {
+      const x = v => (v - t0) / 86400 * 100;
+      const bars = s.spans.map(sp => {
+        const top = { inference: 0, tool: 4, idle: 8 }[sp.kind] || 0;
+        const bg = { inference: '#4a7dff', tool: '#2faa6a', idle: '#bbb' }[sp.kind] || '#999';
+        return `<div title="${esc(sp.label)} [${sp.kind}]" style="position:absolute;left:${x(sp.t_start)}%;width:${Math.max(x(sp.t_end) - x(sp.t_start), 0.2)}%;top:${top}px;height:3px;background:${bg}"></div>`;
+      }).join('');
+      return `<p style="position:relative;height:12px;background:#f5f5f5;margin:2px 0" title="${esc(s.title || s.id)}">${bars}</p>`;
+    }).join('');
+}
+load();
+</script></body></html>
