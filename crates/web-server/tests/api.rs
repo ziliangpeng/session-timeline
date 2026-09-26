@@ -418,3 +418,43 @@ async fn stale_request_answers_immediately_with_old_index() {
         "first stale response serves the old snapshot"
     );
 }
+
+#[tokio::test]
+async fn index_gzip_when_accepted() {
+    use std::io::Read;
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .uri("/api/index?days=2")
+                .header("accept-encoding", "gzip")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response
+            .headers()
+            .get("content-encoding")
+            .and_then(|v| v.to_str().ok()),
+        Some("gzip"),
+        "browser sends Accept-Encoding: gzip — index must compress (3.4MB -> ~0.3MB)"
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    let mut d = flate2::read::GzDecoder::new(&bytes[..]);
+    let mut out = Vec::new();
+    d.read_to_end(&mut out).unwrap();
+    let j: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert!(j["sessions"].is_array());
+}
+
+#[tokio::test]
+async fn index_signature_stable_until_data_changes() {
+    let (_, a) = get_json("/api/index?days=2").await;
+    let sig1 = a["sig"].as_str().expect("sig present").to_string();
+    let (_, b) = get_json("/api/index?days=2").await;
+    let sig2 = b["sig"].as_str().unwrap().to_string();
+    assert_eq!(sig1, sig2, "unchanged data ⇒ unchanged sig (no re-render)");
+}
