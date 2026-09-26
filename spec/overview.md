@@ -142,5 +142,6 @@ Does a session currently in progress need to appear before it ends?
 - `data-model.md` — unified session schema fields, precision, invariants
 - `ui.md` — views, interactions, filters
 - `architecture.md` — server internals, caching, packaging
+- `loader-interface.md` — Q2: the loader contract (SEEDED, decision pending)
 - `adapters/hermes.md`, `adapters/prime.md` — per-source derivation details and
   edge cases
