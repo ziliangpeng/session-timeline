@@ -1,17 +1,25 @@
 //! web-server: harness-agnostic JSON API over the data-read loaders.
 //!
-//! Architecture per spec/architecture.md (first-principles rulings, 2026-09-26):
-//! - a persistent in-memory session INDEX (summaries + interval map + per-day
-//!   counts) built once at startup; invalidated by source-file mtimes
-//!   (~276 files, <1ms stat sweep); span content is NEVER cached — every
-//!   day/session request reads spans from disk on demand
-//! - endpoints: /api/index (from memory), /api/day (interval-map overlap →
+//! Architecture per spec/architecture.md (first-principles rulings, 2026-09-26;
+//! incremental-rebuild amendment after the live-UX incident, same day):
+//! - a persistent in-memory session INDEX (summaries + per-day bucketing) built
+//!   at startup and kept fresh INCREMENTALLY: when the mtime sweep notices a
+//!   changed source file, only that source chunk (one Hermes profile DB or one
+//!   Prime session file) is reloaded and the index reassembled — never a full
+//!   ~13s rescan.
+//! - SERVE-STALE: a request that finds the index stale answers IMMEDIATELY
+//!   with the current snapshot and triggers a background refresh; the next
+//!   request sees the fresh index. No request ever blocks on a rebuild.
+//! - span content is NEVER cached — day/session requests read spans from disk
+//!   on demand.
+//! - endpoints: /api/index (from memory), /api/day (per-day bucket →
 //!   per-session span reads), /api/session?id= (single session)
 //! - gzip on span payloads (meta-heavy, compresses hard)
 //! - binds 127.0.0.1 only (local production contract)
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use axum::{
@@ -22,8 +30,90 @@ use axum::{
     routing::get,
     Router,
 };
-use data_read::{model::Session, scan_stats, ScanStats, Sources};
+use data_read::{model::Session, ScanStats, Sources};
 use serde::Deserialize;
+
+// ---------------------------------------------------------------------------
+// per-source chunks: the unit of incremental rebuild
+// ---------------------------------------------------------------------------
+
+/// One Hermes profile DB or one Prime session file, with its loaded sessions
+/// and the mtimes its sessions were loaded at.
+#[derive(Clone)]
+struct SourceChunk {
+    /// stable identity: "hermes:<profile>" or "prime:<stem>"
+    key: String,
+    files: Vec<PathBuf>,
+    /// file mtimes captured when `sessions` was loaded
+    mtimes: Vec<Option<std::time::SystemTime>>,
+    sessions: Vec<Session>,
+    /// degradation counters from loading this chunk (spec Q4)
+    skipped_sources: u64,
+    skipped_sessions: u64,
+    skipped_rows: u64,
+}
+
+fn load_chunk(key: &str, files: Vec<PathBuf>) -> SourceChunk {
+    let stats = ScanStats::default();
+    let sessions = if let Some(profile) = key.strip_prefix("hermes:") {
+        // one profile DB; files[0] is the db path
+        data_read::loaders::hermes::load_profile_db(
+            &files[0],
+            profile,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            &stats,
+        )
+        .unwrap_or_default()
+    } else if key.starts_with("prime:") {
+        match data_read::loaders::prime::load_file_by_stem(&files[0]) {
+            Some(s) => vec![s],
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    let mtimes = files
+        .iter()
+        .map(|f| std::fs::metadata(f).and_then(|m| m.modified()).ok())
+        .collect();
+    SourceChunk {
+        key: key.to_string(),
+        files,
+        mtimes,
+        sessions,
+        skipped_sources: stats.skipped_sources(),
+        skipped_sessions: stats.skipped_sessions(),
+        skipped_rows: stats.skipped_rows(),
+    }
+}
+
+/// Discover every source chunk currently on disk (cheap: readdir + stat only,
+/// no data read). Key → its file(s).
+fn discover_chunks(sources: &Sources) -> Vec<(String, Vec<PathBuf>)> {
+    let mut out = Vec::new();
+    for (profile, db) in data_read::loaders::hermes::discover_dbs(&sources.hermes_home) {
+        out.push((format!("hermes:{profile}"), vec![db]));
+    }
+    if let Some(dir) = &sources.prime_dir {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let mut files: Vec<PathBuf> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("jsonl"))
+                .collect();
+            files.sort();
+            for f in files {
+                if let Some(stem) = f.file_stem().and_then(|s| s.to_str()) {
+                    if !stem.is_empty() {
+                        out.push((format!("prime:{stem}"), vec![f]));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
 
 // ---------------------------------------------------------------------------
 // in-memory index
@@ -48,129 +138,126 @@ pub struct Index {
     rows: Vec<SummaryRow>,
     /// date → row positions active that day (active-day bucketing, I1)
     by_day: HashMap<String, Vec<usize>>,
-    /// source file path → mtime at index build
-    source_mtimes: Vec<(PathBuf, std::time::SystemTime)>,
-    skipped: SkippedCounts,
+    /// per-source chunks this index was assembled from
+    chunks: Vec<SourceChunk>,
 }
 
-#[derive(Clone, Copy, Default)]
-struct SkippedCounts {
-    sources: u64,
-    sessions: u64,
-    rows: u64,
-}
-
-/// Enumerate every source file the index depends on (for mtime invalidation).
-fn source_files(sources: &Sources) -> Vec<(PathBuf, Option<std::time::SystemTime>)> {
-    let mut out = Vec::new();
-    let mut push_db = |p: PathBuf| {
-        let m = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
-        out.push((p, m));
-    };
-    if sources.hermes_home.join("state.db").is_file() {
-        push_db(sources.hermes_home.join("state.db"));
-    }
-    if let Ok(entries) = std::fs::read_dir(sources.hermes_home.join("profiles")) {
-        for e in entries.filter_map(|e| e.ok()) {
-            let db = e.path().join("state.db");
-            if db.is_file() {
-                push_db(db);
-            }
-        }
-    }
-    if let Some(dir) = &sources.prime_dir {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for e in entries.filter_map(|e| e.ok()) {
-                let p = e.path();
-                if p.extension().and_then(|x| x.to_str()) == Some("jsonl") {
-                    let m = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
-                    out.push((p, m));
+impl Index {
+    fn from_chunks(chunks: Vec<SourceChunk>) -> Index {
+        let mut rows = Vec::new();
+        let mut by_day: HashMap<String, Vec<usize>> = HashMap::new();
+        for chunk in &chunks {
+            for s in &chunk.sessions {
+                let days = active_days(s);
+                let pos = rows.len();
+                for d in &days {
+                    by_day.entry(d.clone()).or_default().push(pos);
                 }
+                rows.push(SummaryRow {
+                    id: s.id.clone(),
+                    title: s.title.clone(),
+                    profile: s.profile.clone(),
+                    source: s.source.clone(),
+                    kind: match s.kind {
+                        data_read::model::SessionKind::Human => "human".to_string(),
+                        data_read::model::SessionKind::Sub => "sub".to_string(),
+                    },
+                    t_start: s.t_start,
+                    t_end: s.t_end,
+                    span_count: s.spans.len(),
+                    days,
+                });
             }
         }
-    }
-    out
-}
-
-fn build_index(sources: &Sources) -> Index {
-    // scan EVERYTHING once (no window): the index covers all history
-    let stats = ScanStats::default();
-    let sessions = scan_stats(sources, f64::NEG_INFINITY, f64::INFINITY, &stats);
-
-    let mut rows = Vec::with_capacity(sessions.len());
-    let mut by_day: HashMap<String, Vec<usize>> = HashMap::new();
-
-    for s in sessions {
-        let days = active_days(&s);
-        let pos = rows.len();
-        for d in &days {
-            by_day.entry(d.clone()).or_default().push(pos);
-        }
-        rows.push(SummaryRow {
-            id: s.id,
-            title: s.title,
-            profile: s.profile,
-            source: s.source,
-            kind: match s.kind {
-                data_read::model::SessionKind::Human => "human".to_string(),
-                data_read::model::SessionKind::Sub => "sub".to_string(),
-            },
-            t_start: s.t_start,
-            t_end: s.t_end,
-            span_count: s.spans.len(),
-            days,
-        });
-    }
-
-    Index {
-        built_at: std::time::Instant::now(),
-        rows,
-        by_day,
-        source_mtimes: source_files(sources)
-            .into_iter()
-            .filter_map(|(p, m)| m.map(|m| (p, m)))
-            .collect(),
-        skipped: SkippedCounts {
-            sources: stats.skipped_sources(),
-            sessions: stats.skipped_sessions(),
-            rows: stats.skipped_rows(),
-        },
-    }
-}
-
-/// True when any source file's mtime differs from the indexed snapshot.
-fn sources_changed(idx: &Index, sources: &Sources) -> bool {
-    let current = source_files(sources);
-    if current.len() != idx.source_mtimes.len() {
-        return true;
-    }
-    let old: HashMap<&Path, std::time::SystemTime> = idx
-        .source_mtimes
-        .iter()
-        .map(|(p, m)| (p.as_path(), *m))
-        .collect();
-    for (p, m) in &current {
-        match (old.get(p.as_path()), m) {
-            (Some(o), Some(n)) if o == n => {}
-            _ => return true,
+        Index {
+            built_at: std::time::Instant::now(),
+            rows,
+            by_day,
+            chunks,
         }
     }
-    false
+
+    /// Chunk keys whose files' current mtimes differ from load time, or that
+    /// no longer exist on disk, or that exist on disk but not in the index.
+    fn diff_chunks(&self, sources: &Sources) -> (Vec<String>, Vec<(String, Vec<PathBuf>)>) {
+        let current = discover_chunks(sources);
+        let known: HashMap<&str, &SourceChunk> =
+            self.chunks.iter().map(|c| (c.key.as_str(), c)).collect();
+        let mut changed = Vec::new();
+        let mut added = Vec::new();
+        for (key, files) in &current {
+            match known.get(key.as_str()) {
+                Some(c) => {
+                    let differs = files.len() != c.files.len()
+                        || files.iter().enumerate().any(|(i, f)| {
+                            let m = std::fs::metadata(f).and_then(|m| m.modified()).ok();
+                            m != c.mtimes.get(i).copied().flatten()
+                        });
+                    if differs {
+                        changed.push(key.clone());
+                    }
+                }
+                None => added.push((key.clone(), files.clone())),
+            }
+        }
+        (changed, added)
+    }
+
+    /// Rebuild incrementally: reload only `changed` chunks, drop chunks whose
+    /// files vanished, add `added` chunks, keep everything else as-is.
+    fn rebuild_incremental(&self, sources: &Sources) -> Index {
+        let (changed, added) = self.diff_chunks(sources);
+        let current: HashMap<String, Vec<PathBuf>> = discover_chunks(sources).into_iter().collect();
+        let mut chunks = Vec::with_capacity(self.chunks.len());
+        for c in &self.chunks {
+            if !current.contains_key(&c.key) {
+                continue; // source file deleted → drop the chunk
+            }
+            if changed.contains(&c.key) {
+                chunks.push(load_chunk(&c.key, current[&c.key].clone()));
+            } else {
+                chunks.push(c.clone());
+            }
+        }
+        for (key, files) in added {
+            chunks.push(load_chunk(&key, files));
+        }
+        Index::from_chunks(chunks)
+    }
 }
 
-type SharedIndex = Arc<std::sync::RwLock<Arc<Index>>>;
+// ---------------------------------------------------------------------------
+// shared state + serve-stale refresh
+// ---------------------------------------------------------------------------
 
-fn fresh_index(shared: &SharedIndex, sources: &Sources) -> Arc<Index> {
-    let current = shared.read().unwrap().clone();
-    if sources_changed(&current, sources) {
-        // rebuild (blocking this request; the sweep is cheap, the rebuild is
-        // the full scan — acceptable for a single-user local tool; the common
-        // case is "no change" and costs <1ms)
-        let fresh = Arc::new(build_index(sources));
-        *shared.write().unwrap() = fresh.clone();
-        fresh
-    } else {
-        current
+#[derive(Clone)]
+struct AppState {
+    sources: Sources,
+    index: Arc<std::sync::RwLock<Arc<Index>>>,
+    /// true while a background refresh is in flight (refresh-storm guard)
+    refreshing: Arc<AtomicBool>,
+}
+
+impl AppState {
+    /// Serve-stale: return the current snapshot immediately; if stale, kick a
+    /// background refresh (unless one is already running).
+    fn snapshot(&self) -> Arc<Index> {
+        let idx = self.index.read().unwrap().clone();
+        let (changed, added) = idx.diff_chunks(&self.sources);
+        if (!changed.is_empty() || !added.is_empty())
+            && !self.refreshing.swap(true, Ordering::SeqCst)
+        {
+            let sources = self.sources.clone();
+            let slot = self.index.clone();
+            let refreshing = self.refreshing.clone();
+            let stale = idx.clone();
+            tokio::task::spawn_blocking(move || {
+                let fresh = Arc::new(stale.rebuild_incremental(&sources));
+                *slot.write().unwrap() = fresh;
+                refreshing.store(false, Ordering::SeqCst);
+            });
+        }
+        idx
     }
 }
 
@@ -249,14 +336,7 @@ struct IndexParams {
 }
 
 async fn api_index(State(app): State<AppState>, Query(p): Query<IndexParams>) -> Response {
-    let idx = {
-        let shared = app.index.clone();
-        let sources = app.sources.clone();
-        match tokio::task::spawn_blocking(move || fresh_index(&shared, &sources)).await {
-            Ok(i) => i,
-            Err(_) => app.index.read().unwrap().clone(),
-        }
-    };
+    let idx = app.snapshot();
     let days = p.days.unwrap_or(31.0).clamp(0.1, 3660.0);
     let t1 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -268,14 +348,21 @@ async fn api_index(State(app): State<AppState>, Query(p): Query<IndexParams>) ->
         .iter()
         .filter(|r| r.t_start < t1 && r.t_end > t0)
         .collect();
+    let (sk_s, sk_se, sk_r) = idx.chunks.iter().fold((0u64, 0u64, 0u64), |(s, se, r), c| {
+        (
+            s + c.skipped_sources,
+            se + c.skipped_sessions,
+            r + c.skipped_rows,
+        )
+    });
     json_response(
         serde_json::json!({
             "sessions": sessions,
             "index_age_s": idx.built_at.elapsed().as_secs_f64(),
             "skipped": {
-                "sources": idx.skipped.sources,
-                "sessions": idx.skipped.sessions,
-                "rows": idx.skipped.rows,
+                "sources": sk_s,
+                "sessions": sk_se,
+                "rows": sk_r,
             },
         }),
         false,
@@ -301,14 +388,7 @@ async fn api_day(State(app): State<AppState>, Query(p): Query<DayParams>) -> Res
     };
 
     // 1) which sessions are active this day (from the in-memory index)
-    let idx = {
-        let shared = app.index.clone();
-        let sources = app.sources.clone();
-        match tokio::task::spawn_blocking(move || fresh_index(&shared, &sources)).await {
-            Ok(i) => i,
-            Err(_) => app.index.read().unwrap().clone(),
-        }
-    };
+    let idx = app.snapshot();
     let ids: Vec<String> = match idx.by_day.get(&p.date) {
         Some(positions) => positions.iter().map(|&i| idx.rows[i].id.clone()).collect(),
         None => idx
@@ -363,12 +443,6 @@ async fn shell() -> Html<&'static str> {
 // plumbing
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
-struct AppState {
-    sources: Sources,
-    index: SharedIndex,
-}
-
 fn err400(msg: &str) -> Response {
     (StatusCode::BAD_REQUEST, msg.to_string()).into_response()
 }
@@ -395,9 +469,33 @@ fn gzip_bytes(data: &[u8]) -> Vec<u8> {
     enc.finish().unwrap_or_default()
 }
 
-/// Build an index from sources (exposed for tests and tools).
+impl Index {
+    /// Exposed for the perf tool (issue #8): which chunks changed vs disk.
+    pub fn diff_chunks_pub(&self, sources: &Sources) -> (Vec<String>, Vec<(String, Vec<PathBuf>)>) {
+        self.diff_chunks(sources)
+    }
+
+    /// Exposed for the perf tool: incremental rebuild timing.
+    pub fn rebuild_incremental_pub(&self, sources: &Sources) -> Index {
+        self.rebuild_incremental(sources)
+    }
+
+    pub fn rows_len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn days_len(&self) -> usize {
+        self.by_day.len()
+    }
+}
+
+/// Build a full index from sources (exposed for tests and tools).
 pub fn test_index(sources: &Sources) -> Index {
-    build_index(sources)
+    let chunks = discover_chunks(sources)
+        .into_iter()
+        .map(|(key, files)| load_chunk(&key, files))
+        .collect();
+    Index::from_chunks(chunks)
 }
 
 /// Testable app builder over a pre-built index (startup warm).
@@ -405,6 +503,7 @@ pub fn app_with_index(sources: Sources, index: Index) -> Router {
     let state = AppState {
         sources,
         index: Arc::new(std::sync::RwLock::new(Arc::new(index))),
+        refreshing: Arc::new(AtomicBool::new(false)),
     };
     Router::new()
         .route("/", get(shell))
@@ -424,11 +523,12 @@ pub async fn serve() {
 
     println!("building session index…");
     let t = std::time::Instant::now();
-    let index = build_index(&sources);
+    let index = test_index(&sources);
     println!(
-        "index: {} sessions, {} days (built in {:.1}s)",
+        "index: {} sessions, {} days, {} sources (built in {:.1}s)",
         index.rows.len(),
         index.by_day.len(),
+        index.chunks.len(),
         t.elapsed().as_secs_f64()
     );
     let app = app_with_index(sources, index);
