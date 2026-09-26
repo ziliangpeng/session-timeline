@@ -1,0 +1,79 @@
+name: rust
+
+on:
+  workflow_dispatch:
+    inputs:
+      mutants:
+        description: "Run mutation testing job (slow)"
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/rust.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/rust.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test (unit + integration)
+        run: cargo test --workspace
+      - name: Clippy (zero warnings enforced)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Format check
+        run: cargo fmt --check
+
+  coverage:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Coverage
+        run: cargo llvm-cov --summary-only
+      # failing threshold left OFF for now; enable once the number is trusted
+      # - name: Enforce minimum coverage
+      #   run: cargo llvm-cov --fail-under-lines 90
+
+  # Manual-only: mutation testing is slow (~30+ min). Run via
+  # Actions tab → rust → Run workflow → mutants, or:
+  #   gh workflow run rust.yml -f mutants=true
+  mutants:
+    if: github.event_name == 'workflow_dispatch' && inputs.mutants
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@cargo-mutants
+      - name: Mutation testing
+        run: cargo mutants --workspace --no-copy-target --time-limit 300s
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-report
+          path: mutants.out/
+          retention-days: 14
