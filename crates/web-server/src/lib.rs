@@ -335,7 +335,11 @@ struct IndexParams {
     days: Option<f64>,
 }
 
-async fn api_index(State(app): State<AppState>, Query(p): Query<IndexParams>) -> Response {
+async fn api_index(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(p): Query<IndexParams>,
+) -> Response {
     let idx = app.snapshot();
     let days = p.days.unwrap_or(31.0).clamp(0.1, 3660.0);
     let t1 = std::time::SystemTime::now()
@@ -348,6 +352,18 @@ async fn api_index(State(app): State<AppState>, Query(p): Query<IndexParams>) ->
         .iter()
         .filter(|r| r.t_start < t1 && r.t_end > t0)
         .collect();
+    // cheap change signature: identical sig ⇒ UI can skip re-render entirely
+    let sig = format!(
+        "{}:{}:{:.3}",
+        sessions.len(),
+        sessions.iter().map(|s| s.span_count).sum::<usize>(),
+        sessions.iter().map(|s| s.t_end).fold(0.0_f64, f64::max)
+    );
+    let accepts_gzip = headers
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("gzip"))
+        .unwrap_or(false);
     let (sk_s, sk_se, sk_r) = idx.chunks.iter().fold((0u64, 0u64, 0u64), |(s, se, r), c| {
         (
             s + c.skipped_sources,
@@ -358,6 +374,7 @@ async fn api_index(State(app): State<AppState>, Query(p): Query<IndexParams>) ->
     json_response(
         serde_json::json!({
             "sessions": sessions,
+            "sig": sig,
             "index_age_s": idx.built_at.elapsed().as_secs_f64(),
             "skipped": {
                 "sources": sk_s,
@@ -365,7 +382,7 @@ async fn api_index(State(app): State<AppState>, Query(p): Query<IndexParams>) ->
                 "rows": sk_r,
             },
         }),
-        false,
+        accepts_gzip, // 3.4MB → ~0.3MB; every browser accepts gzip
     )
 }
 
