@@ -85,20 +85,25 @@ const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 const lday = t => { const d = new Date(t*1000); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
 
 const state = { month: null, day: null, session: null };
+let LAST_SIG = null;
 const filters = { sub: false, cron: false, oneshot: false, short: true };
 let autoSelected = false;
 
+let _byDayCache = null, _byDaySig = null;
 function byDay() {
+  // rebuilt only when INDEX changes; 10k sessions × N days was rebuilt on
+  // EVERY render call before (months loop × byDay() = quadratic blowup)
+  if (_byDayCache && _byDaySig === INDEX) return _byDayCache;
   const m = {};
-  if (!INDEX) return m;
   for (const s of INDEX.sessions)
     for (const d of s.days) (m[d] = m[d] || []).push(s);
+  _byDayCache = m; _byDaySig = INDEX;
   return m;
 }
 
 function fetchIndex() {
   fetch('/api/index?days=120').then(r => r.json()).then(d => {
-    INDEX = d;
+    INDEX = d; LAST_SIG = d.sig || null;
     $('#loading').style.display = 'none';
     if (!autoSelected) {
       autoSelected = true;
@@ -357,12 +362,23 @@ function renderAll() {
 }
 
 fetchIndex();
-// live: poll for new sessions every 60s
+// live: poll for new sessions every 5 min (user call: 1 min was too
+// frequent) — and only touch the DOM when the data actually changed (sig:
+// count + spans + max t_end). Re-rendering 10k sessions mid-hover is what
+// made the UI feel broken.
 setInterval(() => {
   fetch('/api/index?days=120').then(r=>r.json()).then(d => {
-    // invalidate day caches (sessions may have grown)
-    for (const k of Object.keys(DAY)) delete DAY[k];
+    if (d.sig && d.sig === LAST_SIG) return;      // nothing changed: no re-render
+    LAST_SIG = d.sig;
+    // day data is only stale for sessions that grew; drop just those days
+    const grew = new Set();
+    if (INDEX) for (const s of d.sessions) {
+      const old = INDEX.sessions.find(o => o.id === s.id);
+      if (old && old.span_count !== s.span_count)
+        for (const k of old.days) grew.add(k);
+    }
+    for (const k of Object.keys(DAY)) if (grew.has(k)) delete DAY[k];
     INDEX = d; renderAll();
   }).catch(()=>{});
-}, 60000);
+}, 300000);
 </script></body></html>
