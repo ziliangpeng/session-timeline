@@ -11,7 +11,14 @@ pub const T0: f64 = 100.0;
 pub const T1: f64 = 300.0;
 
 fn tmp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("dataread-test-{}-{}", tag, std::process::id()));
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let d = std::env::temp_dir().join(format!(
+        "dataread-test-{}-{}-{n}",
+        tag,
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
