@@ -1,7 +1,7 @@
 # session-timeline — Overview
 
-Status: DRAFT (incremental spec; this file is the entry point, details land in
-companion docs as they are settled)
+Status: SETTLED core (span derivation, architecture, invariants — all decided
+and test-locked). This file is the entry point; details live in companion docs.
 
 ## Problem
 
@@ -33,9 +33,10 @@ sessions:
 
 ## Architecture (decided)
 
-**Web server + web UI, querying source data on demand.** No pre-pull, no baked
-artifacts, no scheduled exports: the server reads from the harness databases at
-request time and serves the UI from live queries.
+**Rust workspace, web server + web UI, querying source data on demand.**
+Components: `crates/data-read` (loaders + CLI), `crates/web-server` (axum API +
+embedded UI), `crates/perf` (benchmark tool, issue #8). The Python prototype in
+`experimental/` is frozen as a historical reference, not a source of truth.
 
 **Three layers, one harness-specific seam:**
 
@@ -45,7 +46,7 @@ request time and serves the UI from live queries.
 │  (month → day → session drill-down, spans, filters)         │
 ├─────────────────────────────────────────────────────────────┤
 │  Web server — JSON API, harness-agnostic                    │
-│  (on-demand queries, day bucketing, summaries, detail)      │
+│  (in-memory index, on-demand span reads, gzip)              │
 ├─────────────────────────────────────────────────────────────┤
 │  Unified session schema — THE contract                      │
 │  Session { id, title, profile, source, kind, t_start,       │
@@ -73,7 +74,7 @@ silence ended by a user msg            = IDLE
 silence longer than the gap cap        = IDLE (long silence), never inference
 ```
 
-## Correctness invariants (each validated in the prototype by a test or a bug)
+## Correctness invariants (each locked by a test)
 
 1. Sessions appear on **every day they have activity on**, not just their start
    day (long-lived chats must stay visible on later days).
@@ -91,57 +92,31 @@ silence longer than the gap cap        = IDLE (long silence), never inference
 - Instrumenting or modifying any harness.
 - Perfect attribution — this is best-effort reconstruction; the derivation
   model documents every inference made.
-- Real-time monitoring (< ~2 min staleness). This is a postmortem tool.
+- Real-time monitoring. This is a postmortem tool with a 5-minute refresh.
 
-## Open questions
+## Settled questions (formerly "open")
 
-### Q1 — Caching and prefetch strategy (ruling: cache is fine; details to iterate)
+- **Q1 — Caching**: settled in `architecture.md` (in-memory index, mtime
+  invalidation, serve-stale; span content always from disk).
+- **Q2 — Loader interface**: settled in `loader-interface.md` (candidate A,
+  coarse whole-session contract).
+- **Q3 — Schema fields**: settled (minimal schema; `title` optional, degrade
+  gracefully). Field semantics live in `data-model.md` if a second consumer
+  ever needs them — not written until then (YAGNI).
+- **Q4 — Detail payload boundaries**: settled in `architecture.md` (meta
+  inline in day payloads, gzip; no per-span hover endpoint; 220-char previews).
+- **Q5 — Live behavior**: UI polls every **5 minutes** (was 60s; user call
+  2026-09-26 — too chatty). Responses carry a change signature; unchanged data
+  causes zero DOM work. Push (SSE/websocket) remains a non-goal until a need
+  appears.
 
-Cache and in-memory prefetch are acceptable. Staleness of a few minutes is not
-a problem. **No temp files** — cache lives in memory only.
+## Companion docs
 
-Open sub-questions to resolve by iteration (measure first, decide later):
-- How much data actually needs to be resident? Can the server answer month/day
-  listings from a small index, and pull a given day's sessions only when that
-  day is clicked? What is that speed/size tradeoff?
-- Does anything need to be pulled at startup, or can everything be lazy?
-- The prototype's answer (full-window snapshot, ~120s TTL background rebuild)
-  is one data point; alternatives (per-day lazy load, per-profile lazily) get
-  measured against it once real numbers exist.
-
-### Q2 — Loader interface granularity
-
-Needs a dedicated spec doc (`loader-interface.md`); too detailed for the
-overview. The overview only fixes: loaders are the single harness-specific
-seam, they emit the unified session schema, and everything above them is
-harness-agnostic.
-
-### Q3 — Schema fields (ruling: start loose and simple)
-
-The unified schema starts minimal; iterate as real needs appear. `title` is
-OPTIONAL — a harness that has no titles (Prime) simply omits it; the server/UI
-degrade gracefully (derive a display label lazily if needed). Field-by-field
-semantics get settled in `data-model.md` over time. Principle: always start
-with something simple.
-
-### Q4 — Detail payload boundaries
-
-Tool args/results can be huge. Prototype: index payload has no meta strings;
-per-day detail shards carry span labels + args/result previews (220-char cap).
-Questions: is 220 chars the right preview cap? Should full results be a
-per-span on-demand query (new endpoint) rather than shipped in day shards? Do
-we ever show content beyond what the harness itself fed the model?
-
-### Q5 — Live behavior
-
-UI polls every 60s. Is polling fine, or do we want push (SSE/websocket) later?
-Does a session currently in progress need to appear before it ends?
-
-## Companion docs (to be written)
-
-- `data-model.md` — unified session schema fields, precision, invariants
-- `ui.md` — views, interactions, filters
-- `architecture.md` — server internals, caching, packaging
-- `loader-interface.md` — Q2: the loader contract (SEEDED, decision pending)
+- `architecture.md` — server internals: production contract, index, endpoints,
+  perf model
+- `loader-interface.md` — the loader contract (DECIDED)
+- `ui.md` — views, interactions, filters (user-visible behavior)
+- `traceability.md` — spec → implementation → test matrix
 - `adapters/hermes.md`, `adapters/prime.md` — per-source derivation details and
-  edge cases
+  edge cases (to be written when a loader change needs documentation; the
+  loaders' doc-comments + edge-case tests carry this today)
