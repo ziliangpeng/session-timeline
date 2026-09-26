@@ -28,7 +28,7 @@ that lock it. A missing cell = a coverage hole. Regenerate evidence with
 
 | # | Spec statement | Implementation | Locking tests |
 |---|----------------|----------------|---------------|
-| I1 | Sessions appear on every day they have activity on | **server concern** (day bucketing) — loader provides full extent + spans so any day touched is derivable | q2_session_overlapping_window_is_returned_unchanged (extent unclipped: spans reaching outside the window are preserved) |
+| I1 | Sessions appear on every day they have activity on | server: `active_days()` + per-day bucket in web-server/src/lib.rs | day_endpoint_catches_cross_day_session_via_index; day_returns_full_sessions_active_that_day |
 | I2 | Session extent from span/message timestamps, never row order | `build_session` extent = min/max over spans (fallback: message ts) | q7_extent_from_span_extremes_not_row_order |
 | I3 | Harness-injected user rows never count as human input | hermes: `platform_message_id IS NULL` filter for human count | q5_injected_user_messages_do_not_make_a_session_human |
 | I4 | Silence above gap cap is idle, never inference | same as S4 | q7_silence_over_gap_cap, prime_long_silence |
@@ -57,18 +57,43 @@ that lock it. A missing cell = a coverage hole. Regenerate evidence with
 | L1 | `sessions_overlapping(t0, t1) -> list[Session]` coarse contract | `scan(&Sources, t0, t1) -> Vec<Session>` (+ Stats/Reported variants) | every test calling scan_stats |
 | L2 | Server-side index/detail split stays a server concern; loaders blind to usage | loaders take only (window); no index/detail APIs | code review: no such APIs exist |
 
+## web-server (crates/web-server)
+
+| # | Spec statement (architecture.md / ui.md) | Implementation | Locking tests |
+|---|----------------|----------------|---------------|
+| W1 | 127.0.0.1-only bind, local single binary | `serve()` SocketAddr from ([127,0,0,1], port) | code review (bind is in serve(); no test binds a port) |
+| W2 | Startup-warm index; first page load ~0ms | `serve()` builds index before listening | serve() code path; perf tool measures build |
+| W3 | Serve-stale: stale request answers immediately, background refresh (single-flight) | `AppState::snapshot()` + AtomicBool guard | stale_request_answers_immediately_with_old_index, index_rebuilds_when_source_mtime_changes (convergence form) |
+| W4 | Per-source incremental rebuild | `Index::diff_chunks`/`rebuild_incremental` | index_rebuilds_when_source_mtime_changes |
+| W5 | `/api/day` reads spans only for sessions active that day (interval-map, no window heuristic) | `api_day` via `by_day` bucket → `load_session_by_id` | day_returns_full_sessions_active_that_day, day_endpoint_catches_cross_day_session_via_index |
+| W6 | `/api/session?id=` single session; unknown → 404 | `api_session` | session_endpoint_returns_one_session, session_endpoint_unknown_id_404 |
+| W7 | `/api/index` gzip when Accept-Encoding present + carries `sig` change signature | `api_index` headers + sig format | index_gzip_when_accepted, index_signature_stable_until_data_changes |
+| W8 | Bad date → 400 | `api_day` parse | day_bad_date_is_400 |
+| W9 | `days` param clamped | `api_index` clamp | index_clamps_days |
+| W10 | UI shell served at `/` | `shell()` include_str!(app.html) | shell_serves_html |
+| W11 | by-id load id must equal scanned id (profile identity explicit) | `load_session_by_id(home, profile, sid)` | by_id_profile_matches_scan_profile (data-read) |
+| W12 | UI polls every 5 min, sig-gated; day cache evicted only for grown days | app.html poller | manual (UI logic is in-page JS; not unit-testable in this repo today) |
+
+## perf tool (crates/perf, issue #8)
+
+Measures: cold index build, incremental rebuild (one chunk), endpoint
+latencies (median+p95, in-process router), per-source load ranking,
+stale-sweep cost. Real data by default; `--synthetic` generates a fixture
+tree. Recorded honest finding: incremental rebuild does NOT beat cold on this
+machine when the changed chunk is `hermes:default` (96% of sessions) —
+session-level incrementality is the recorded follow-up (issue #8).
+
 ## Known gaps (honest list)
 
-- **I1 day bucketing**: implemented in the (Python) prototype server; the Rust
-  server component doesn't exist yet. Loader-side support (unclipped extents)
-  is tested; the bucketing itself gets tested when the server lands.
-- **Q1 perf regression tests**: benchmarks recorded in the PR body, not
-  automated. A `cargo bench`/criterion suite is future work.
-- **GAP_CAP_S boundary** (exactly 300s): untested boundary; tests use 6/10-min
-  silences. Mutation testing will flag this.
-- **Prime `scan_dir`'s mtime prefilter**: superseded by first/last-line probes;
-  the mtime branch is dead-ish code (coverage shows partially exercised) —
-  candidate for deletion when mutants confirm.
+- **Q1 perf regression tests**: perf tool exists (issue #8) and prints the
+  numbers, but no automated pass/fail thresholds. CI dispatch job for perf
+  runs is still open (issue #8 acceptance criteria).
+- **W12 UI JS logic** (sig-gating, cache eviction): not unit-tested — the UI
+  is a single embedded HTML page. If UI complexity grows, extract testable
+  modules.
+- **Prime `scan_dir`'s mtime prefilter**: superseded by first/last-line
+  probes; the mtime branch is dead-ish code — candidate for deletion when
+  mutants confirm.
 
 ## Mutation testing (evidence, 2026-09-25 local run)
 
@@ -93,9 +118,10 @@ Re-running the full suite is a CI job (manual dispatch), not a local loop.
 ## Verification commands
 
 ```bash
-cargo test                          # 64 tests, all green
+cargo test                          # 77 tests, all green (data-read 64 + web-server 13)
 cargo clippy --all-targets -- -D warnings   # 0 warnings (CI-enforced)
-cargo llvm-cov --summary-only       # ~93% lines
+cargo llvm-cov --summary-only       # ~93% lines (data-read)
+cargo run --release -p perf         # perf tool: 5 measurement groups (issue #8)
 # mutation testing: CI manual dispatch (Actions → rust → Run workflow → mutants)
 #   gh workflow run rust.yml -f mutants=true
 ```

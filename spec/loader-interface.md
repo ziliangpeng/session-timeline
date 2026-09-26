@@ -1,87 +1,56 @@
-# Loader interface (Q2) — dedicated discussion doc
+# Loader interface (Q2) — DECIDED
 
-Status: OPEN — no decision yet. This doc exists to collect the options, the
-prototype's evidence, and the decision criteria. The overview only fixes:
-loaders are the single harness-specific seam; they emit the unified session
-schema; everything above them is harness-agnostic.
+Status: **DECIDED (2026-09-25, grill Q1-Q10)** — candidate A, coarse
+whole-session contract, locked by tests (see traceability.md). This doc keeps
+the candidates and evidence that led to the decision; the decision itself is
+no longer open.
 
-## The question
+## The decision
 
-What exactly is the loader interface — the contract between harness-specific
-code and the harness-agnostic server?
+**Candidate A — whole sessions by time window.** Loaders emit complete unified
+`Session` objects for every session overlapping the window. The server-side
+index/detail split (in-memory index vs on-demand span reads) is a server
+implementation detail that loaders stay blind to.
 
-## Candidate A — coarse: whole sessions by time window
+Rationale: trivial contract (~70 lines per loader), easy exhaustive testing
+(one function, synthetic fixtures), matches "start simple" (Q3 ruling), and
+the prototype validated it. Revisit triggers: a third harness whose sources
+can't serve A cheaply, or index-only residency proving meaningfully cheaper.
 
-```python
-class Loader:
-    def sessions_overlapping(self, t0: float, t1: float) -> list[Session]
+## The Rust contract (as implemented)
+
+```rust
+pub fn scan(&Sources, t0: f64, t1: f64) -> Vec<Session>
+pub fn scan_stats(&Sources, t0: f64, t1: f64, &ScanStats) -> Vec<Session>
+pub fn load_session_by_id(&Sources, id: &str) -> Option<Session>   // server-support addition
+// per-source: hermes::load_profile_db(db, profile, t0, t1, &ScanStats)
+//             prime::load_file_by_stem(path)
 ```
 
-One call returns complete unified-session objects (all spans + meta) for every
-session overlapping the window.
+- `scan`/`scan_stats`: sessions overlapping `[t0, t1)` (half-open, unclipped),
+  full spans + meta. Parallelism (rayon) is internal.
+- `load_session_by_id` + per-source loaders: added when the server needed
+  on-demand single-session reads; the same coarse object shape, narrower
+  scope. Profile identity is passed EXPLICITLY (never derived from paths —
+  regression-locked by `by_id_profile_matches_scan_profile`).
+- Degradation is never fatal: skips counted in `ScanStats` (sources/sessions/
+  rows), CLI exits 0 on broken sources (Q4, Q10).
 
-- Prototype behavior today (Hermes + Prime loaders both implement this).
-- Server-side, the prototype then splits into index/detail shards per day.
-- Pros: trivial contract; a loader is ~70 lines; easy to reason about; easy
-  testing (one function, synthetic fixtures).
-- Cons: pulls everything in the window even if the user only looks at one day;
-  the index/detail split becomes a server implementation detail that can drift
-  from what loaders assume about usage.
+## Candidates considered
 
-## Candidate B — fine-grained: index + detail queries
+- **B — fine-grained (index + detail queries)**: aligned with UI access
+  pattern, but N+1 patterns, per-day detail across profiles is awkward, Prime
+  has no random access, harder to test. Rejected for v1.
+- **C — capability negotiation**: honest about heterogeneous sources, but two
+  code paths per server feature erodes "one unified schema". Rejected.
 
-```python
-class Loader:
-    def session_index(self, t0: float, t1: float) -> list[SessionSummary]  # no spans
-    def session_detail(self, session_id) -> Session                        # spans + meta
-    def day_detail(self, day: str) -> dict[session_id, list[SpanMeta]]     # ?
-```
+## Evidence that informed the decision (measured, 2026-09-25)
 
-The server asks for summaries first, and materializes spans only for the
-session/day the user actually opened.
-
-- Pros: aligns the contract with the UI's actual access pattern (month listing
-  → day view → one session); keeps memory small under Q1's iteration; each
-  query is small and measurable.
-- Cons: N+1 query patterns; per-day detail across profiles is awkward (a
-  Hermes "day" query needs a join across all profile DBs; Prime has no day
-  concept at all — it would have to scan); loaders become stateful or need
-  their own caching; harder to test exhaustively.
-
-## Candidate C — capability negotiation
-
-Loaders advertise what they can do cheaply (e.g. `supports_day_query`,
-`supports_incremental`), and the server picks a strategy per loader.
-
-- Pros: honest about heterogeneous sources (SQLite can do indexed time-range
-  queries; JSONL files can't).
-- Cons: two code paths for every server feature; the "unified schema maximizes
-  reusability" principle starts eroding at the loader seam.
-
-## Evidence from the prototype (measured on a 3-month window, ~8.5k sessions)
-
-- Full-window scan (both loaders, all sources): 13–24s, ~16MB index JSON +
-  ~100MB detail. Fine for a TTL snapshot; way too slow for per-request.
-- Per-day detail shard (what one day click needs): ~5ms once the snapshot
-  exists; a fresh per-day pull would be dominated by opening 30 SQLite DBs
-  (~0.2s each even for a tiny query).
-- Prime has no random access: any "day query" degenerates to a full file scan
-  per session file; caching JSONL parses in memory is the only way to make it
-  fast.
-
-## Decision criteria (what we should know before deciding)
-
-1. Q1 iteration results: how big is the real resident set for index-only
-   caching vs full snapshots?
-2. Do we ever need cross-source queries the server can't compose from whole
-   sessions (e.g. "all tool calls matching X across all profiles")?
-3. How often do loaders get written? If new harnesses are rare, a simple
-   contract beats an optimal one.
-
-## Current lean (to be challenged)
-
-Keep candidate A (coarse) for v1 — it is what the prototype validated, it
-matches "start simple" (Q3 ruling), and the server-side index/detail split is a
-server optimization that loaders stay blind to. Revisit if Q1 iteration shows
-index-only residency is meaningfully cheaper, or a third harness appears whose
-sources can't serve A cheaply.
+- Full-window scan (both loaders, all sources): benchmarked 1d/0.17s/24MB →
+  92d/7.2s/366MB after Prime streaming + first/tail probes.
+- Prime has no random access: any day query degenerates to a file scan;
+  streaming + probes keep whole-file reads cheap enough for the coarse
+  contract.
+- The server's on-demand span reads (api_day/api_session) hit SQLite by
+  session id and single Prime files — cheap enough that fine-grained loader
+  APIs weren't needed.
