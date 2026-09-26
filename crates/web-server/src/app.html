@@ -1,39 +1,368 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><title>session-timeline</title>
-<style>body{font-family:system-ui;margin:2rem}button{margin:2px}</style></head>
-<body>
-<h1>session-timeline</h1>
-<div id="app">loading…</div>
+<html><head><meta charset="utf-8"><title>session timelines</title>
+<style>
+ body { font: 13px/1.5 -apple-system, sans-serif; margin: 0; background: #14161a; color: #d7dae0; }
+ header { padding: 10px 24px; border-bottom: 1px solid #262a31; position: sticky; top: 0; background: #14161acc; backdrop-filter: blur(6px); z-index: 10; }
+ header h1 { font-size: 15px; margin: 0 0 4px; display: inline-block; }
+ .legend { font-size: 12px; color: #8a8f98; margin-left: 18px; display: inline-block; }
+ .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 12px; vertical-align: -1px; }
+ #live { color: #3fb28f; font-size: 12px; margin-left: 14px; }
+ main { padding: 18px 24px 80px; }
+ .sec { margin-bottom: 30px; }
+ .sec > h2 { font-size: 12px; color: #7c828d; text-transform: uppercase; letter-spacing: .06em; margin: 0 0 8px; border-bottom: 1px solid #23272e; padding-bottom: 4px; }
+ #filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 22px; }
+ .fbtn { background: #1e2127; border: 1px solid #2c313a; border-radius: 16px; padding: 5px 12px; cursor: pointer; font-size: 12px; color: #d7dae0; }
+ .fbtn.off { color: #5d636d; text-decoration: line-through; }
+ .fbtn:hover { border-color: #6c8ef5; }
+ .fsep { color: #3a3f47; margin: 0 2px; }
+ .mrow, .drow { display: flex; flex-wrap: wrap; gap: 8px; }
+ .monthbtn, .daybtn { background: #1e2127; border: 1px solid #2c313a; border-radius: 8px; padding: 8px 12px; cursor: pointer; min-width: 86px; }
+ .monthbtn { min-width: 128px; }
+ .monthbtn:hover, .daybtn:hover { border-color: #6c8ef5; }
+ .monthbtn.sel, .daybtn.sel { border-color: #6c8ef5; background: #232941; }
+ .monthbtn .d, .daybtn .d { font-weight: 600; }
+ .daybtn .d { font-size: 15px; }
+ .monthbtn .c, .daybtn .c { color: #7c828d; font-size: 11px; }
+ .lane { display: flex; align-items: center; margin: 3px 0; }
+ .lbl { width: 210px; color: #8a8f98; font-size: 11px; text-align: right; padding-right: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; cursor: pointer; }
+ .lbl.sub { color: #5d636d; }
+ .track { position: relative; flex: 1; height: 16px; background: #1e2127; border-radius: 4px; }
+ .seg { position: absolute; top: 1px; bottom: 1px; border-radius: 3px; min-width: 1px; }
+ .seg.inference { background: #6c8ef5; }
+ .seg.tool { background: #3fb28f; }
+ .seg.idle { background: #8a8f98; opacity: .5; }
+ .seg.idle.carryover { opacity: .12; }
+ .sub-row .seg { opacity: .55; }
+ .sub-row .seg.idle.carryover { opacity: .07; }
+ .gl { position: absolute; top: 0; bottom: 0; width: 1px; background: #ffffff14; }
+ .axisrow { margin-top: 1px; } .axis { height: 16px; background: none; }
+ .tick { position: absolute; top: 2px; transform: translateX(-50%); color: #7c828d; font-size: 10px; white-space: nowrap; }
+ .summary { color: #9fd0ff; margin: 1px 0 4px; font-family: ui-monospace, monospace; font-size: 12px; }
+ .meta { color: #7c828d; font-size: 11px; margin: 0 0 4px; }
+ .sess-block h3 { font-size: 13px; margin: 0; }
+ #tip { position: fixed; background: #0f1116; border: 1px solid #3a3f47; border-radius: 8px; padding: 8px 10px; font-size: 12px; max-width: 420px; pointer-events: none; z-index: 50; display: none; box-shadow: 0 6px 24px #000a; }
+ #tip .t { color: #9fd0ff; }
+ #tip .m { color: #7c828d; margin-top: 3px; white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow: hidden; }
+ #panel { position: fixed; right: 0; top: 0; bottom: 0; width: 460px; background: #101318; border-left: 1px solid #2c313a; padding: 16px; overflow-y: auto; display: none; z-index: 40; }
+ #panel h3 { margin: 0 0 6px; font-size: 14px; }
+ #panel .kv { color: #7c828d; font-size: 12px; margin-bottom: 8px; }
+ #panel pre { background: #0c0e12; border: 1px solid #262a31; border-radius: 6px; padding: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto; }
+ #panel .note { color: #5d636d; font-size: 11px; margin-top: 8px; }
+ .empty-hint { color: #5d636d; font-size: 12px; }
+ #loading { color: #7c828d; padding: 40px; text-align: center; }
+</style></head><body>
+<header>
+  <h1>Agent session timelines</h1>
+  <span id="live">● live</span>
+  <span class="legend">
+    <i style="background:#6c8ef5"></i>inference
+    <i style="background:#3fb28f"></i>tools
+    <i style="background:#8a8f98;opacity:.5"></i>idle
+    <span style="color:#5d636d">· dimmed = subagent sessions (no human input)</span>
+  </span>
+</header>
+<main>
+  <div id="loading">loading index…</div>
+  <div id="filters"></div>
+  <section class="sec" id="sec-months"></section>
+  <section class="sec" id="sec-days"></section>
+  <section class="sec" id="sec-day"></section>
+  <section class="sec" id="sec-session"></section>
+</main>
+<div id="tip"></div>
+<div id="panel"></div>
 <script>
-// minimal shell: month/day nav + timeline rows (ported incrementally from the
-// validated prototype UI; kept deliberately small for v1)
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-async function load() {
-  const r = await fetch('/api/index?days=31');
-  const j = await r.json();
-  const byDay = {};
-  for (const s of j.sessions) for (const d of s.days) (byDay[d] ||= []).push(s);
-  const ds = Object.keys(byDay).sort().reverse();
-  const latest = ds[0];
-  document.getElementById('app').innerHTML =
-    ds.map(d => `<p><button onclick="show('${d}')">${d} (${byDay[d].length})</button></p>`).join('') +
-    (latest ? '<div id="day"></div>' : '<p>no sessions in window</p>');
-  if (latest) show(latest);
+// Port of the validated prototype UI (experimental/app_shell.html) onto the
+// Rust API: /api/index?days=N (summaries + active days) and
+// /api/day?date=YYYY-MM-DD (full sessions incl. spans + meta — no separate
+// detail shard needed).
+let INDEX = null;            // /api/index response
+const DAY = {};              // date -> full sessions array (from /api/day)
+const $ = s => document.querySelector(s);
+const fmt = s => s >= 3600 ? (s/3600).toFixed(1)+'h' : s >= 60 ? Math.round(s/60)+'min' : Math.round(s)+'s';
+const dts = t => new Date(t*1000).toLocaleString([], {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const lday = t => { const d = new Date(t*1000); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
+
+const state = { month: null, day: null, session: null };
+const filters = { sub: false, cron: false, oneshot: true, short: true };
+let autoSelected = false;
+
+function byDay() {
+  const m = {};
+  if (!INDEX) return m;
+  for (const s of INDEX.sessions)
+    for (const d of s.days) (m[d] = m[d] || []).push(s);
+  return m;
 }
-async function show(d) {
-  const r = await fetch('/api/day?date=' + d);
-  const j = await r.json();
-  const t0 = new Date(d + 'T00:00:00').getTime() / 1000;
-  document.getElementById('day').innerHTML = '<h2>' + esc(d) + '</h2>' +
-    j.sessions.map(s => {
-      const x = v => (v - t0) / 86400 * 100;
-      const bars = s.spans.map(sp => {
-        const top = { inference: 0, tool: 4, idle: 8 }[sp.kind] || 0;
-        const bg = { inference: '#4a7dff', tool: '#2faa6a', idle: '#bbb' }[sp.kind] || '#999';
-        return `<div title="${esc(sp.label)} [${sp.kind}]" style="position:absolute;left:${x(sp.t_start)}%;width:${Math.max(x(sp.t_end) - x(sp.t_start), 0.2)}%;top:${top}px;height:3px;background:${bg}"></div>`;
+
+function fetchIndex() {
+  fetch('/api/index?days=120').then(r => r.json()).then(d => {
+    INDEX = d;
+    $('#loading').style.display = 'none';
+    if (!autoSelected) {
+      autoSelected = true;
+      const ds = Object.keys(byDay()).sort();
+      if (ds.length) {
+        state.day = ds[ds.length - 1];
+        state.month = state.day.slice(0, 7);
+      }
+    }
+    renderAll();
+  });
+}
+
+function findFull(id) {
+  // full session object: prefer the currently-viewed day's cache
+  if (state.day && DAY[state.day]) {
+    const hit = DAY[state.day].find(s => s.id === id);
+    if (hit) return hit;
+  }
+  for (const d of Object.keys(DAY)) {
+    const hit = DAY[d].find(s => s.id === id);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function summary(id) { return INDEX.sessions.find(s => s.id === id); }
+
+function passesFilters(s) {
+  if (!filters.sub && s.kind === 'sub') return false;
+  if (!filters.cron && s.source === 'cron') return false;
+  if (!filters.oneshot && s.source === 'oneshot') return false;
+  if (!filters.short && (s.t_end - s.t_start) < 300) return false;
+  return true;
+}
+
+function renderFilters() {
+  const n = { sub: 0, cron: 0, oneshot: 0, short: 0 };
+  for (const s of INDEX.sessions) {
+    if (s.kind === 'sub') n.sub++;
+    if (s.source === 'cron') n.cron++;
+    if (s.source === 'oneshot') n.oneshot++;
+    if ((s.t_end - s.t_start) < 300) n.short++;
+  }
+  const btn = (key, label) =>
+    `<div class="fbtn ${filters[key] ? '' : 'off'}" data-f="${key}">${label} · ${n[key]}</div>`;
+  $('#filters').innerHTML =
+    btn('sub', '↳ subagents') + btn('cron', '⏰ cron') + btn('oneshot', '⚡ oneshots') +
+    btn('short', '&lt;5min sessions') +
+    `<span class="fsep">|</span><span style="color:#5d636d;font-size:12px">off = hidden</span>`;
+  $('#filters').querySelectorAll('.fbtn').forEach(el => el.onclick = () => {
+    filters[el.dataset.f] = !filters[el.dataset.f];
+    renderAll();
+  });
+}
+
+function months() {
+  const m = {};
+  for (const d of Object.keys(byDay()).sort()) (m[d.slice(0,7)] = m[d.slice(0,7)]||[]).push(d);
+  return m;
+}
+
+function ticks(t0, t1) {
+  const steps=[60,120,300,600,900,1800,3600,7200,10800,21600,43200,86400];
+  const dur=t1-t0; let step=steps[steps.length-1];
+  for (const s of steps) if (dur/s<=9) { step=s; break; }
+  const out=[]; let t=Math.ceil(t0/step)*step;
+  while (t < t1-step*0.02) {
+    const d=new Date(t*1000);
+    out.push([t, step<3600||d.getHours()!==0 ? d.toTimeString().slice(0,5) : d.toLocaleDateString([], {month:'2-digit',day:'2-digit'})]);
+    t+=step;
+  }
+  return out;
+}
+
+function tipHtml(rows) { return rows.map(([k,v])=>`<div class="t">${k}</div><div class="m">${v||''}</div>`).join(''); }
+function bindTip(el, html) {
+  el.addEventListener('mousemove', e => {
+    e.stopPropagation();
+    const t=$('#tip'); t.innerHTML=html; t.style.display='block';
+    const x=Math.min(e.clientX+14, innerWidth-450), y=Math.min(e.clientY+14, innerHeight-160);
+    t.style.left=x+'px'; t.style.top=y+'px';
+  });
+  el.addEventListener('mouseleave', ()=>$('#tip').style.display='none');
+}
+
+function renderMonths() {
+  let h = '';
+  for (const [m, days] of Object.entries(months())) {
+    let nh=0, ns=0;
+    for (const d of days) for (const s of byDay()[d]) (s.kind==='sub'?ns++:nh++);
+    h += `<div class="monthbtn ${state.month===m?'sel':''}" data-m="${m}">
+      <div class="d">${m}</div><div class="c">${nh} top-level · ${ns} subagent</div></div>`;
+  }
+  $('#sec-months').innerHTML = `<h2>months</h2><div class="mrow">${h}</div>`;
+  $('#sec-months').querySelectorAll('.monthbtn').forEach(el => el.onclick = () => {
+    state.month = el.dataset.m; state.day = null; state.session = null;
+    renderAll();
+    $('#sec-days').scrollIntoView({behavior:'smooth'});
+  });
+}
+
+function renderDays() {
+  const sec = $('#sec-days');
+  if (!state.month) { sec.innerHTML=''; return; }
+  const days = months()[state.month] || [];
+  let h = '';
+  for (const d of days) {
+    const ss = byDay()[d].filter(passesFilters);
+    const nh = ss.filter(s=>s.kind!=='sub').length, ns = ss.filter(s=>s.kind==='sub').length;
+    h += `<div class="daybtn ${state.day===d?'sel':''}" data-d="${d}">
+      <div class="d">${d.slice(8)}</div><div class="c">${nh} top · ${ns} sub</div></div>`;
+  }
+  sec.innerHTML = `<h2>${state.month} — pick a day</h2><div class="drow">${h}</div>`;
+  sec.querySelectorAll('.daybtn').forEach(el => el.onclick = () => {
+    state.day = el.dataset.d; state.session = null;
+    renderAll();
+    $('#sec-day').scrollIntoView({behavior:'smooth'});
+  });
+}
+
+function renderDayView() {
+  const sec = $('#sec-day');
+  if (!state.day) { sec.innerHTML=''; return; }
+  const ids = (byDay()[state.day] || []).filter(passesFilters).map(s => s.id);
+  if (!ids.length) { sec.innerHTML = `<h2>${state.day}</h2><p class="empty-hint">no sessions</p>`; return; }
+  const day0 = new Date(state.day+'T00:00:00').getTime()/1000, day1 = day0+86400;
+  const render = () => {
+    const full = ids.map(findFull).filter(Boolean);
+    if (!full.length) { sec.innerHTML = `<h2>${state.day}</h2><p class="empty-hint">loading…</p>`; return; }
+    // sort by most recent activity within this day (latest first)
+    const lastActiveToday = s => {
+      let m = 0;
+      for (const sp of s.spans) m = Math.max(m, Math.min(sp.t_end, day1));
+      return m;
+    };
+    full.sort((a, b) => lastActiveToday(b) - lastActiveToday(a));
+    const tk = ticks(day0, day1);
+    const grid = tk.map(([t])=>`<div class="gl" style="left:${(t-day0)/86400*100}%"></div>`).join('');
+    let rows = '';
+    for (const s of full) {
+      const sorted = [...s.spans].sort((a,b)=>a.t_start-b.t_start);
+      const segs = sorted.map(sp => {
+        const a = Math.max(sp.t_start, day0), b = Math.min(sp.t_end, day1);
+        if (b <= a) return '';
+        const carry = sp.kind === 'idle' && sp.t_start < day0 ? ' carryover' : '';
+        return `<div class="seg ${sp.kind}${carry}" style="left:${(a-day0)/86400*100}%;width:${Math.max((b-a)/86400*100,0.05)}%"></div>`;
       }).join('');
-      return `<p style="position:relative;height:12px;background:#f5f5f5;margin:2px 0" title="${esc(s.title || s.id)}">${bars}</p>`;
-    }).join('');
+      rows += `<div class="lane ${s.kind==='sub'?'sub-row':''}" data-id="${encodeURIComponent(s.id)}">
+        <span class="lbl ${s.kind==='sub'?'sub':''}" title="${esc(s.title)}">${s.kind==='sub'?'↳ ':''}[${esc(s.profile||'?')}] ${esc(s.title)}</span>
+        <div class="track">${grid}${segs}</div></div>`;
+    }
+    const axis = tk.map(([t,l])=>`<span class="tick" style="left:${(t-day0)/86400*100}%">${l}</span>`).join('');
+    sec.innerHTML = `<h2>${state.day} — all sessions on one clock</h2>
+      <p class="meta">click a row to expand that session below · hover any segment for detail</p>
+      ${rows}
+      <div class="lane axisrow"><span class="lbl"></span><div class="track axis">${axis}</div></div>`;
+    sec.querySelectorAll('.lane[data-id]').forEach(el => {
+      const s = findFull(decodeURIComponent(el.dataset.id));
+      el.onclick = () => {
+        state.session = s.id; renderAll();
+        $('#sec-session').scrollIntoView({behavior:'smooth'});
+      };
+      // per-span tooltips: segs render 1:1 with sorted spans (skipped ones emit '')
+      const segEls = el.querySelectorAll('.seg');
+      const sorted = [...s.spans].sort((a,b)=>a.t_start-b.t_start);
+      const visible = sorted.filter(sp => Math.min(sp.t_end, day1) > Math.max(sp.t_start, day0));
+      segEls.forEach((segEl, i) => {
+        const sp = visible[i]; if (!sp) return;
+        const m = sp.meta || {};
+        const overnight = sp.kind==='idle' && sp.t_start < day0;
+        const title = sp.kind==='tool' ? (sp.label||'tool')
+          : sp.kind==='inference' ? 'model' : (overnight ? 'idle (overnight from ' + lday(sp.t_start) + ')' : 'idle');
+        const body = sp.kind==='tool' ? `args: ${(m.args||'').slice(0,140)}`
+          : sp.kind==='inference' ? (m.output||'(tool-call only)').slice(0,140)
+          : (m.next_user ? `you then said: ${(m.next_user||'').slice(0,140)}` : (m.note || ''));
+        bindTip(segEl, tipHtml([
+          [`${esc(title)} · ${fmt(sp.t_end-sp.t_start)}`, `${dts(sp.t_start)} → ${dts(sp.t_end)}`],
+          [esc(body), '']
+        ]));
+      });
+    });
+  };
+  if (DAY[state.day]) render();
+  else fetch('/api/day?date='+state.day).then(r=>r.json()).then(d => { DAY[state.day] = d.sessions; render(); });
 }
-load();
+
+function renderSessionView() {
+  const sec = $('#sec-session');
+  if (!state.session) { sec.innerHTML=''; return; }
+  const render = (s) => {
+    if (!s) { sec.innerHTML=''; return; }
+    const t0 = s.t_start, t1 = s.t_end, dur = Math.max(t1-t0, 1);
+    const tk = ticks(t0, t1);
+    const grid = tk.map(([t])=>`<div class="gl" style="left:${(t-t0)/dur*100}%"></div>`).join('');
+    let rows = '';
+    for (const kind of ['idle','inference','tool']) {
+      const ks = s.spans.filter(sp => sp.kind===kind); if (!ks.length) continue;
+      const segs = ks.map(sp =>
+        `<div class="seg ${kind}" style="left:${(sp.t_start-t0)/dur*100}%;width:${Math.max((sp.t_end-sp.t_start)/dur*100,0.06)}%"></div>`).join('');
+      rows += `<div class="lane"><span class="lbl">${kind}</span><div class="track">${grid}${segs}</div></div>`;
+    }
+    const axis = tk.map(([t,l])=>`<span class="tick" style="left:${(t-t0)/dur*100}%">${l}</span>`).join('');
+    sec.innerHTML = `<div class="sess-block">
+      <h2>${esc(s.kind==='sub'?'↳ ':'')}${esc(s.title)}</h2>
+      <p class="summary">${fmt(s.t_end-s.t_start)} wall · ${s.spans.length} spans</p>
+      <p class="meta">${esc(s.id)} · ${dts(s.t_start)} → ${dts(s.t_end)} · click a green segment for the tool call</p>
+      ${rows}
+      <div class="lane axisrow"><span class="lbl"></span><div class="track axis">${axis}</div></div>
+    </div>`;
+    sec.querySelectorAll('.lane').forEach(lane => {
+      const kind = lane.querySelector('.lbl').textContent;
+      const segs = lane.querySelectorAll('.seg');
+      const spans = s.spans.filter(sp => sp.kind===kind);
+      segs.forEach((el, i) => {
+        const sp = spans[i]; if (!sp) return;
+        const m = sp.meta || {};
+        if (kind === 'tool') {
+          bindTip(el, tipHtml([
+            [`${esc(sp.label||'tool')} · ${fmt(sp.t_end-sp.t_start)}`, `${dts(sp.t_start)} → ${dts(sp.t_end)}`],
+            ['args', esc((m.args||'').slice(0,180))]
+          ]));
+          el.onclick = () => {
+            const p = $('#panel');
+            p.innerHTML = `<h3>${esc(sp.label||'tool')}</h3>
+              <div class="kv">${dts(sp.t_start)} → ${dts(sp.t_end)} · ${fmt(sp.t_end-sp.t_start)}</div>
+              <div class="kv">args</div><pre>${esc(m.args||'') || '(none)'}</pre>
+              <div class="kv">result — this is what entered the model's context</div><pre>${esc(m.result||'') || '(empty)'}</pre>
+              <div class="note">preview truncated at 220 chars; the harness may truncate further before it reaches the model</div>`;
+            p.style.display = 'block';
+          };
+        } else if (kind === 'idle') {
+          const body = m.next_user ? `you then said: ${(m.next_user||'').slice(0,160)}` : (m.note || '');
+          bindTip(el, tipHtml([[`idle · ${fmt(sp.t_end-sp.t_start)}`, esc(body)]]));
+        } else {
+          bindTip(el, tipHtml([[`model · ${fmt(sp.t_end-sp.t_start)}`, esc((m.output||'(tool-call only, no visible text)').slice(0,160))]]));
+        }
+      });
+    });
+  };
+  const cached = findFull(state.session);
+  if (cached) render(cached);
+  else {
+    // not in any loaded day: fetch the day it starts on
+    const sum = summary(state.session);
+    const d = sum ? lday(sum.t_start) : state.day;
+    if (d) fetch('/api/day?date='+d).then(r=>r.json()).then(x => { DAY[d] = x.sessions; render(findFull(state.session)); });
+    else render(null);
+  }
+}
+
+function renderAll() {
+  if (!INDEX) return;
+  $('#tip').style.display='none'; $('#panel').style.display='none';
+  renderFilters(); renderMonths(); renderDays(); renderDayView(); renderSessionView();
+}
+
+fetchIndex();
+// live: poll for new sessions every 60s
+setInterval(() => {
+  fetch('/api/index?days=120').then(r=>r.json()).then(d => {
+    // invalidate day caches (sessions may have grown)
+    for (const k of Object.keys(DAY)) delete DAY[k];
+    INDEX = d; renderAll();
+  }).catch(()=>{});
+}, 60000);
 </script></body></html>
