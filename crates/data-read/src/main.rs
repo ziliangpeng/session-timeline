@@ -4,6 +4,22 @@
 
 use std::path::PathBuf;
 
+fn print_help() {
+    println!(
+        "data-read — session-timeline data loader (CLI smoke)
+
+USAGE:
+    data-read scan [OPTIONS]
+
+OPTIONS:
+    --days <N>          window length in days back from now (default 7, accepts fractions)
+    --hermes-home <DIR> Hermes home containing state.db + profiles/*/state.db
+    --prime-dir <DIR>   Prime sessions dir of *.jsonl files (\"\" to disable)
+    --json              machine-readable one-line summary
+    -h, --help          this help"
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut days: f64 = 7.0;
@@ -14,6 +30,10 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "scan" => {}
+            "-h" | "--help" | "help" => {
+                print_help();
+                std::process::exit(0);
+            }
             "--days" => {
                 i += 1;
                 days = args.get(i).and_then(|v| v.parse().ok()).unwrap_or(7.0);

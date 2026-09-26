@@ -1,5 +1,7 @@
 //! Synthetic fixtures for data-read tests: temp-dir Hermes homes (SQLite) and
 //! Prime session dirs (JSONL). No real DBs, no personal data — ever.
+//! Shared by several test binaries; not every helper is used by every binary.
+#![allow(dead_code)]
 
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
