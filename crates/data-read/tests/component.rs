@@ -571,3 +571,40 @@ fn sources_p(home: &std::path::Path) -> Sources {
         prime_dir: None,
     }
 }
+
+// ---------- boundary: exactly GAP_CAP_S ----------
+
+#[test]
+fn q7_gap_exactly_at_cap_is_inference() {
+    // gap == GAP_CAP_S (300.0s) is on the inference side of the boundary
+    // (gap <= GAP_CAP_S → inference). One second over → idle.
+    let home = hermes_home("q7_cap_edge");
+    fixtures::write_db(
+        &home.join("state.db"),
+        &[fixtures::sess_row(
+            "s1",
+            None,
+            None,
+            Some("tui"),
+            100.0,
+            900.0,
+        )],
+        &[
+            fixtures::msg_row(1, "user", "q", 100.0, None, None, None),
+            fixtures::msg_row(2, "assistant", "a", 400.0, None, None, None), // gap exactly 300
+            fixtures::msg_row(3, "assistant", "b", 701.0, None, None, None), // gap 301 → idle
+        ],
+    );
+    let ss = scan_stats(&sources_p(&home), T0, T1, &ScanStats::default());
+    let s = &ss[0];
+    assert_eq!(
+        s.union_duration(SpanKind::Inference),
+        300.0,
+        "gap==300 counted as inference (boundary is <=)"
+    );
+    assert_eq!(
+        s.union_duration(SpanKind::Idle),
+        301.0,
+        "gap==301 counted as idle"
+    );
+}
