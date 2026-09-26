@@ -1,0 +1,21 @@
+[package]
+name = "perf"
+version = "0.1.0"
+edition = "2021"
+description = "Perf test tool for session-timeline key components (issue #8)"
+license = "MIT"
+
+[dependencies]
+data-read = { path = "../data-read" }
+web-server = { path = "../web-server" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio = { version = "1", features = ["rt", "macros", "net"] }
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+http = "1"
+serde_json = "1"
+
+[[bin]]
+name = "perf"
+path = "src/main.rs"
