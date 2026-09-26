@@ -1,7 +1,10 @@
 //! web-server integration tests: in-process axum router against synthetic
 //! fixtures (temp-dir Hermes DB + Prime JSONL). No real data, no live port.
 
-use axum::{body::Body, http::{Request, StatusCode}};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use data_read::Sources;
 use tower::ServiceExt; // .oneshot
 
@@ -32,7 +35,14 @@ fn test_sources() -> (Sources, std::path::PathBuf) {
 
     fixtures::write_db(
         &home.join("state.db"),
-        &[fixtures::sess_row("hs1", Some("hermes session"), None, Some("tui"), t0, t2)],
+        &[fixtures::sess_row(
+            "hs1",
+            Some("hermes session"),
+            None,
+            Some("tui"),
+            t0,
+            t2,
+        )],
         &[
             fixtures::msg_row(1, "user", "hello", t0, None, None, None),
             fixtures::msg_row(2, "assistant", "hi", t1, None, None, None),
@@ -141,9 +151,12 @@ async fn day_returns_full_sessions_active_that_day() {
     let sessions = json["sessions"].as_array().expect("sessions");
     assert!(!sessions.is_empty(), "day has sessions");
     // full session objects: spans included
-    let with_spans = sessions
-        .iter()
-        .any(|s| s["spans"].as_array().map(|a| !a.is_empty()).unwrap_or(false));
+    let with_spans = sessions.iter().any(|s| {
+        s["spans"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false)
+    });
     assert!(with_spans, "spans present in day detail: {json}");
 }
 
