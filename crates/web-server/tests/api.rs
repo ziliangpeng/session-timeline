@@ -289,7 +289,42 @@ async fn index_rebuilds_when_source_mtime_changes() {
     )
     .unwrap();
 
-    let second = router
+    // SERVE-STALE: the request that notices staleness answers with the OLD
+    // snapshot immediately (never blocks); the rebuild happens in background.
+    // So: first hit after the change may still report n_before, but within a
+    // short window the index must converge to n_before + 1.
+    let mut n_after = 0;
+    let mut converged = false;
+    for _ in 0..200 {
+        let r = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/index?days=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let b2 = axum::body::to_bytes(r.into_body(), 16 * 1024 * 1024)
+            .await
+            .unwrap();
+        let j2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+        n_after = j2["sessions"].as_array().unwrap().len();
+        if n_after == n_before + 1 {
+            converged = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        converged,
+        "background refresh must converge to {}/{} sessions (got {n_after})",
+        n_before + 1,
+        n_before
+    );
+    // and the immediate answer right after a fresh build is the fresh index
+    let third = router
         .oneshot(
             Request::builder()
                 .uri("/api/index?days=2")
@@ -298,16 +333,11 @@ async fn index_rebuilds_when_source_mtime_changes() {
         )
         .await
         .unwrap();
-    let b2 = axum::body::to_bytes(second.into_body(), 16 * 1024 * 1024)
+    let b3 = axum::body::to_bytes(third.into_body(), 16 * 1024 * 1024)
         .await
         .unwrap();
-    let j2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
-    let n_after = j2["sessions"].as_array().unwrap().len();
-    assert_eq!(
-        n_after,
-        n_before + 1,
-        "mtime change triggered index rebuild"
-    );
+    let j3: serde_json::Value = serde_json::from_slice(&b3).unwrap();
+    assert_eq!(j3["sessions"].as_array().unwrap().len(), n_before + 1);
 }
 
 #[tokio::test]
@@ -334,4 +364,57 @@ async fn day_endpoint_catches_cross_day_session_via_index() {
             .any(|s| s["id"].as_str() == Some(id.as_str()));
         assert!(found, "session {id} missing from day {day}");
     }
+}
+
+#[tokio::test]
+async fn stale_request_answers_immediately_with_old_index() {
+    // Serve-stale core promise: while a rebuild would be needed, the request
+    // still returns the CURRENT snapshot fast (not a build). We verify the
+    // first response after a source change carries index_age_s > 0 AND the
+    // old session set — i.e. it served the stale index, not a fresh build.
+    let (sources, base) = test_sources();
+    let index = web_server::test_index(&sources);
+    let router = web_server::app_with_index(sources.clone(), index);
+
+    let r = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/index?days=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let b = axum::body::to_bytes(r.into_body(), 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    let j: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    let n_before = j["sessions"].as_array().unwrap().len();
+
+    // change a source (touch the prime file — mtime bump, same content)
+    let f = base.join("prime/ps1.jsonl");
+    let content = std::fs::read(&f).unwrap();
+    std::fs::write(&f, content).unwrap();
+
+    // immediate request: must answer with the OLD count (stale), quickly
+    let r2 = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/index?days=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let b2 = axum::body::to_bytes(r2.into_body(), 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    let j2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+    assert_eq!(
+        j2["sessions"].as_array().unwrap().len(),
+        n_before,
+        "first stale response serves the old snapshot"
+    );
 }
