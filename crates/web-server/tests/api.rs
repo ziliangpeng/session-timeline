@@ -97,7 +97,8 @@ fn test_sources() -> (Sources, std::path::PathBuf) {
 
 fn app() -> axum::Router {
     let (sources, _base) = test_sources();
-    web_server::app(sources)
+    let index = web_server::test_index(&sources);
+    web_server::app_with_index(sources, index)
 }
 
 // the binary crate exposes app(); tests link against it via the lib target
@@ -105,15 +106,29 @@ fn app() -> axum::Router {
 // spawn the binary? No: we add a lib target exposing app()).
 
 async fn get_json(uri: &str) -> (StatusCode, serde_json::Value) {
+    use std::io::Read;
     let response = app()
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
     let status = response.status();
+    let gzipped = response
+        .headers()
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        == Some("gzip");
     let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
         .await
         .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    let plain = if gzipped {
+        let mut d = flate2::read::GzDecoder::new(&bytes[..]);
+        let mut out = Vec::new();
+        d.read_to_end(&mut out).unwrap();
+        out
+    } else {
+        bytes.to_vec()
+    };
+    let json: serde_json::Value = serde_json::from_slice(&plain).unwrap_or(serde_json::Value::Null);
     (status, json)
 }
 
@@ -134,7 +149,7 @@ async fn index_returns_sessions_with_days() {
         assert!(!days.is_empty(), "active-day bucketing filled: {s}");
     }
     // elapsed + skipped present
-    assert!(json["elapsed_s"].is_number());
+    assert!(json["index_age_s"].is_number());
     assert!(json["skipped"]["sources"].is_number());
 }
 
@@ -192,4 +207,131 @@ async fn shell_serves_html() {
         .unwrap_or_default()
         .to_string();
     assert!(ct.contains("html"), "content-type: {ct}");
+}
+
+#[tokio::test]
+async fn session_endpoint_returns_one_session() {
+    let (_, idx) = get_json("/api/index?days=2").await;
+    let some_id = idx["sessions"][0]["id"]
+        .as_str()
+        .expect("an id")
+        .to_string();
+    let (status, json) = get_json(&format!("/api/session?id={some_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["session"]["id"].as_str(), Some(some_id.as_str()));
+    assert!(json["session"]["spans"].is_array());
+}
+
+#[tokio::test]
+async fn session_endpoint_unknown_id_404() {
+    let (status, _) = get_json("/api/session?id=hermes:default:nope").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn index_rebuilds_when_source_mtime_changes() {
+    // build an app over fixture sources, note session count; touch a source
+    // file (append a message); the next /api/index must reflect the change.
+    let (sources, base) = test_sources();
+    let index = web_server::test_index(&sources);
+    let router = web_server::app_with_index(sources.clone(), index);
+    let first = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/index?days=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let b = axum::body::to_bytes(first.into_body(), 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    let j: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    let n_before = j["sessions"].as_array().unwrap().len();
+
+    // append a new session to the prime dir (bumps its mtime)
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let iso = |t: u64| {
+        let secs = t as i64;
+        let days = secs.div_euclid(86400);
+        let rem = secs.rem_euclid(86400);
+        let z = days + 719468;
+        let era = if z >= 0 { z } else { z - 146096 } / 146097;
+        let doe = z - era * 146097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = if m <= 2 { y + 1 } else { y };
+        format!(
+            "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+            rem / 3600,
+            (rem % 3600) / 60,
+            rem % 60
+        )
+    };
+    std::fs::write(
+        base.join("prime/second.jsonl"),
+        format!(
+            "{{\"type\":\"session\",\"timestamp\":\"{ts0}\"}}\n\
+             {{\"type\":\"message\",\"timestamp\":\"{ts0}\",\"message\":{{\"role\":\"user\",\"content\":\"late\"}}}}\n\
+             {{\"type\":\"message\",\"timestamp\":\"{ts1}\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"ok\"}}]}}}}\n",
+            ts0 = iso(now - 120),
+            ts1 = iso(now - 60),
+        ),
+    )
+    .unwrap();
+
+    let second = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/index?days=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let b2 = axum::body::to_bytes(second.into_body(), 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    let j2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+    let n_after = j2["sessions"].as_array().unwrap().len();
+    assert_eq!(
+        n_after,
+        n_before + 1,
+        "mtime change triggered index rebuild"
+    );
+}
+
+#[tokio::test]
+async fn day_endpoint_catches_cross_day_session_via_index() {
+    // a session active across two local days must appear on BOTH days
+    let (_, idx) = get_json("/api/index?days=2").await;
+    let cross: Vec<&serde_json::Value> = idx["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["days"].as_array().map(|d| d.len() > 1).unwrap_or(false))
+        .collect();
+    if cross.is_empty() {
+        return; // no cross-day session in this fixture set (acceptable)
+    }
+    let id = cross[0]["id"].as_str().unwrap().to_string();
+    for d in cross[0]["days"].as_array().unwrap() {
+        let day = d.as_str().unwrap();
+        let (_, day_json) = get_json(&format!("/api/day?date={day}")).await;
+        let found = day_json["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"].as_str() == Some(id.as_str()));
+        assert!(found, "session {id} missing from day {day}");
+    }
 }
