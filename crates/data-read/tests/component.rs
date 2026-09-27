@@ -498,8 +498,8 @@ fn q7_extent_from_span_extremes_not_row_order() {
             None,
             None,
             Some("tui"),
-            100.0,
-            999.0,
+            110.0,
+            130.0,
         )],
         &[
             fixtures::msg_row(1, "user", "q", 100.0, None, None, None),
@@ -516,6 +516,43 @@ fn q7_extent_from_span_extremes_not_row_order() {
         (ss[0].t_start - 100.0).abs() < 1e-9 && (ss[0].t_end - 130.0).abs() < 1e-9,
         "extent from spans, got [{}, {}]",
         ss[0].t_start,
+        ss[0].t_end
+    );
+}
+
+#[test]
+fn i1_envelope_covers_compacted_history() {
+    // In-place compaction soft-archives history (active=0): the surviving
+    // active rows start far later than the session did. The sessions-table
+    // envelope must keep the session visible on its earlier days.
+    let home = hermes_home("i1_envelope");
+    fixtures::write_db(
+        &home.join("state.db"),
+        &[fixtures::sess_row(
+            "s1",
+            None,
+            None,
+            Some("cli"),
+            100.0,
+            900.0,
+        )],
+        &[
+            fixtures::msg_row(1, "user", "recent q", 800.0, None, None, None),
+            fixtures::msg_row(2, "assistant", "recent a", 810.0, None, None, None),
+        ],
+    );
+    // soft-archive one older active row to simulate compaction leftovers
+    fixtures::set_active(&home.join("state.db"), 1, 0);
+    let ss = scan_stats(&sources_p(&home), T0, T1, &ScanStats::default());
+    assert_eq!(ss.len(), 1);
+    assert!(
+        (ss[0].t_start - 100.0).abs() < 1e-9,
+        "t_start must honor envelope start, got {}",
+        ss[0].t_start
+    );
+    assert!(
+        (ss[0].t_end - 900.0).abs() < 1e-9,
+        "t_end must honor envelope end, got {}",
         ss[0].t_end
     );
 }

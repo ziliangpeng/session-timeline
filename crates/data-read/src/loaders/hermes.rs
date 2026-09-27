@@ -76,7 +76,10 @@ pub fn load_profile_db(
     };
 
     let mut sess_stmt = match conn.prepare(
-        "SELECT id, title, parent_session_id, source FROM sessions
+        "SELECT id, title, parent_session_id, source,
+                started_at,
+                COALESCE(ended_at, last_activity_at, started_at)
+         FROM sessions
          WHERE archived=0 AND started_at IS NOT NULL
            AND started_at < ?1 AND COALESCE(ended_at, last_activity_at, started_at) > ?2
          ORDER BY started_at",
@@ -88,17 +91,31 @@ pub fn load_profile_db(
         }
     };
 
-    type SessRow = (String, Option<String>, Option<String>, Option<String>);
+    type SessRow = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<f64>,
+        Option<f64>,
+    );
     let rows: Vec<SessRow> = sess_stmt
         .query_map([t1, t0], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
         })
         .map_err(|e| format!("query sessions: {e}"))?
         .filter_map(|r| r.ok())
         .collect();
 
     let mut out = Vec::new();
-    for (sid, title, parent, source) in rows {
+    for (sid, title, parent, source, env_start, env_end) in rows {
         let mut msg_stmt = match conn.prepare(
             "SELECT role, tool_name, tool_call_id, tool_calls, content, timestamp, platform_message_id
              FROM messages WHERE session_id=?1 AND active=1
@@ -131,7 +148,15 @@ pub fn load_profile_db(
         if msgs.is_empty() {
             continue;
         }
-        if let Some(sess) = build_session(profile, &sid, title, parent, source, &msgs, stats) {
+        // Envelope from the sessions table (started_at / last activity). Message
+        // rows only cover the post-compaction tail: in-place compaction
+        // soft-archives history (active=0), which would otherwise collapse a
+        // long-running session's t_start to the latest compaction point and
+        // erase its earlier days. Union span extremes with the envelope so the
+        // session shows on every day it was actually alive (I1), while spans
+        // still come only from active rows (I6).
+        let env = env_start.zip(env_end).filter(|(s, e)| e >= s);
+        if let Some(sess) = build_session(profile, &sid, title, parent, source, &msgs, env, stats) {
             out.push(sess);
         }
     }
@@ -155,6 +180,7 @@ fn build_session(
     parent: Option<String>,
     source: Option<String>,
     msgs: &[MsgRow],
+    env: Option<(f64, f64)>,
     stats: &crate::ScanStats,
 ) -> Option<Session> {
     let human_msgs = msgs
@@ -301,6 +327,12 @@ fn build_session(
             msgs.iter().map(|m| m.ts).fold(f64::NEG_INFINITY, f64::max),
         )
     };
+    // Union with the sessions-table envelope (I1): compaction soft-archives
+    // history, so message rows alone under-report when a long session began.
+    let (t_start, t_end) = match env {
+        Some((es, ee)) => (t_start.min(es), t_end.max(ee)),
+        None => (t_start, t_end),
+    };
     if t_end < t_start {
         return None;
     }
@@ -366,14 +398,22 @@ pub fn load_session_by_id(home: &Path, profile: &str, sid: &str) -> Option<Sessi
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .ok()?;
-    let row: Option<(Option<String>, Option<String>, Option<String>)> = conn
+    let row: Option<(
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<f64>,
+        Option<f64>,
+    )> = conn
         .query_row(
-            "SELECT title, parent_session_id, source FROM sessions WHERE id = ?1 AND archived = 0",
+            "SELECT title, parent_session_id, source, started_at,
+                    COALESCE(ended_at, last_activity_at, started_at)
+             FROM sessions WHERE id = ?1 AND archived = 0",
             [sid],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .ok();
-    let (title, parent, source) = row?;
+    let (title, parent, source, env_start, env_end) = row?;
     let mut stmt = conn
         .prepare(
             "SELECT role, tool_name, tool_call_id, tool_calls, content, timestamp, platform_message_id
@@ -399,6 +439,7 @@ pub fn load_session_by_id(home: &Path, profile: &str, sid: &str) -> Option<Sessi
     if msgs.is_empty() {
         return None;
     }
+    let env = env_start.zip(env_end).filter(|(s, e)| e >= s);
     build_session(
         profile,
         sid,
@@ -406,6 +447,7 @@ pub fn load_session_by_id(home: &Path, profile: &str, sid: &str) -> Option<Sessi
         parent,
         source,
         &msgs,
+        env,
         &crate::ScanStats::default(),
     )
 }
