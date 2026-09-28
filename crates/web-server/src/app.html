@@ -86,6 +86,7 @@
 let INDEX = null;            // /api/index response
 const DAY = {};              // date -> full sessions array (from /api/day)
 const AGG_TIPS = {};          // day-view aggregate row metadata (rebuilt per render)
+const FULL_SESS = {};         // id -> full (unclipped) session from /api/session
 const $ = s => document.querySelector(s);
 const fmt = s => s >= 3600 ? (s/3600).toFixed(1)+'h' : s >= 60 ? Math.round(s/60)+'min' : Math.round(s)+'s';
 const dts = t => new Date(t*1000).toLocaleString([], {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
@@ -405,15 +406,14 @@ function renderSessionView() {
       });
     });
   };
-  const cached = findFull(state.session);
-  if (cached) render(cached);
-  else {
-    // not in any loaded day: fetch the day it starts on
-    const sum = summary(state.session);
-    const d = sum ? lday(sum.t_start) : state.day;
-    if (d) fetch('/api/day?date='+d).then(r=>r.json()).then(x => { DAY[d] = x.sessions; render(findFull(state.session)); });
-    else render(null);
-  }
+  // day caches hold day-clipped spans; the session view zooms to the session's
+  // own extent, so always fetch the FULL session from /api/session.
+  if (!FULL_SESS[state.session]) {
+    fetch('/api/session?id='+encodeURIComponent(state.session)).then(r=>r.json()).then(x => {
+      if (x && x.session) { FULL_SESS[state.session] = x.session; }
+      render(FULL_SESS[state.session] || null);
+    }).catch(()=>render(null));
+  } else render(FULL_SESS[state.session]);
 }
 
 function renderAll() {
@@ -439,6 +439,12 @@ setInterval(() => {
         for (const k of old.days) grew.add(k);
     }
     for (const k of Object.keys(DAY)) if (grew.has(k)) delete DAY[k];
+    // grew sessions' full-session cache is stale too (detail view zooms to the
+    // session's own extent from /api/session data)
+    for (const id of Object.keys(FULL_SESS)) {
+      const grewToo = (d.sessions || []).some(s => s.id === id);
+      if (grewToo) delete FULL_SESS[id];
+    }
     INDEX = d; renderAll();
   }).catch(()=>{});
 }, 300000);

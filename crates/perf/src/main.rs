@@ -146,6 +146,12 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
 
+    let day_arg: Option<String> = args
+        .iter()
+        .position(|a| a == "--day")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+
     let (sources, label) = if synthetic {
         let root = std::env::temp_dir().join(format!("perf-synth-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -168,6 +174,47 @@ fn main() {
 
     println!("session-timeline perf tool (issue #8)");
     println!("data: {label}\n");
+
+    // ---- day-load benchmark (/api/day hot path, in-process) ----
+    {
+        let index = web_server::test_index(&sources);
+        if let Some(date) = &day_arg {
+            let (t0, t1) = web_server::test_day_bounds(date);
+            let sessions_idx: Vec<String> = index.ids_for_day(date, t0, t1);
+            println!("day load {} — {} sessions", date, sessions_idx.len());
+            for label_mode in 0..2 {
+                let mut times = Vec::new();
+                let mut bytes = 0usize;
+                for _ in 0..3 {
+                    let t = Instant::now();
+                    let loaded: Vec<data_read::model::Session> = if label_mode == 0 {
+                        sessions_idx
+                            .iter()
+                            .filter_map(|id| data_read::load_session_by_id(&sources, id))
+                            .collect()
+                    } else {
+                        use rayon::prelude::*;
+                        sessions_idx
+                            .par_iter()
+                            .filter_map(|id| data_read::load_session_by_id(&sources, id))
+                            .collect()
+                    };
+                    let el = t.elapsed();
+                    times.push(ms(el));
+                    bytes = loaded
+                        .iter()
+                        .map(|s| serde_json::to_string(s).unwrap_or_default().len())
+                        .sum();
+                }
+                row(
+                    if label_mode == 0 { "day load (serial)" } else { "day load (rayon)" },
+                    &format!("{:.0} ms", median(&mut times)),
+                    &format!("{} KB json", bytes / 1024),
+                );
+            }
+            println!();
+        }
+    }
 
     // ---- 5. stale-detection sweep (run first: it's the per-request tax) ----
     {

@@ -236,6 +236,11 @@ struct AppState {
     index: Arc<std::sync::RwLock<Arc<Index>>>,
     /// true while a background refresh is in flight (refresh-storm guard)
     refreshing: Arc<AtomicBool>,
+    /// /api/day response cache: date -> (fingerprint, compressed body).
+    /// The fingerprint covers the day's session-id set and the mtimes of the
+    /// source files owning those sessions, so a live index refresh that does
+    /// not touch the day's data keeps the cached body valid.
+    day_cache: Arc<std::sync::Mutex<HashMap<String, (u64, Vec<u8>)>>>,
 }
 
 impl AppState {
@@ -391,7 +396,11 @@ struct DayParams {
     date: String,
 }
 
-async fn api_day(State(app): State<AppState>, Query(p): Query<DayParams>) -> Response {
+async fn api_day(
+    State(app): State<AppState>,
+    headers: header::HeaderMap,
+    Query(p): Query<DayParams>,
+) -> Response {
     let parts: Vec<&str> = p.date.split('-').collect();
     if parts.len() != 3 {
         return err400("date must be YYYY-MM-DD");
@@ -404,7 +413,9 @@ async fn api_day(State(app): State<AppState>, Query(p): Query<DayParams>) -> Res
         return err400("invalid date");
     };
 
-    // 1) which sessions are active this day (from the in-memory index)
+    // fingerprint-scoped cache: repeat views of an unchanged day are free.
+    // The fingerprint = day's session-id set + owning source file mtimes, so
+    // unrelated live writes (other profiles, other days) do not evict it.
     let idx = app.snapshot();
     let ids: Vec<String> = match idx.by_day.get(&p.date) {
         Some(positions) => positions.iter().map(|&i| idx.rows[i].id.clone()).collect(),
@@ -415,24 +426,126 @@ async fn api_day(State(app): State<AppState>, Query(p): Query<DayParams>) -> Res
             .map(|r| r.id.clone())
             .collect(),
     };
+    let fp = day_fingerprint(&app.sources, &ids);
+    if let Some((c, body)) = app.day_cache.lock().unwrap().get(&p.date) {
+        if *c == fp {
+            return cached_day_response(body, &headers);
+        }
+    }
 
-    // 2) read spans ONLY for those sessions (disk truth, on demand)
+    // 2) read spans for those sessions in PARALLEL (disk truth, on demand),
+    //    then clip spans to the day window: a day view renders only the day,
+    //    and long-lived cross-day sessions otherwise ship their whole history
+    //    (multi-MB of spans + meta) for a few hours of visible coverage. The
+    //    full session is available from /api/session?id= on demand.
     let sources = app.sources.clone();
+    let (t0c, t1c) = (t0, t1);
     let sessions = tokio::task::spawn_blocking(move || {
-        ids.iter()
+        use rayon::prelude::*;
+        ids.par_iter()
             .filter_map(|id| data_read::load_session_by_id(&sources, id))
+            .map(|mut s| {
+                s.spans.retain(|sp| sp.t_start < t1c && sp.t_end > t0c);
+                s
+            })
             .collect::<Vec<_>>()
     })
     .await
     .unwrap_or_default();
 
-    json_response(
-        serde_json::json!({
-            "date": p.date,
-            "sessions": sessions,
-        }),
-        true, // gzip: meta-heavy payload compresses hard
-    )
+    let body = serde_json::json!({
+        "date": p.date,
+        "sessions": sessions,
+    });
+    let gz = gzip_bytes(body.to_string().as_bytes());
+    app.day_cache
+        .lock()
+        .unwrap()
+        .insert(p.date.clone(), (fp, gz.clone()));
+    cached_day_response(&gz, &headers)
+}
+
+/// Fingerprint a day payload: its session-id set plus the mtimes of the source
+/// files that own those sessions. Two fingerprints match iff the id set is
+/// identical and no owning source file changed on disk since.
+fn day_fingerprint(sources: &Sources, ids: &[String]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for id in ids {
+        if let Some(rest) = id.strip_prefix("hermes:") {
+            if let Some((profile, _)) = rest.split_once(':') {
+                let f = if profile == "default" {
+                    sources.hermes_home.join("state.db")
+                } else {
+                    sources
+                        .hermes_home
+                        .join("profiles")
+                        .join(profile)
+                        .join("state.db")
+                };
+                files.push(f);
+            }
+        } else if let Some(stem) = id.strip_prefix("prime:") {
+            if let Some(dir) = sources.prime_dir.as_ref() {
+                files.push(dir.join(format!("{stem}.jsonl")));
+            }
+        }
+    }
+    files.sort();
+    files.dedup();
+
+    let mut h = DefaultHasher::new();
+    let mut sorted_ids: Vec<&String> = ids.iter().collect();
+    sorted_ids.sort();
+    for id in sorted_ids {
+        id.hash(&mut h);
+    }
+    for f in &files {
+        f.hash(&mut h);
+        if let Ok(md) = std::fs::metadata(f) {
+            if let Ok(m) = md.modified() {
+                m.hash(&mut h);
+            }
+        }
+    }
+    h.finish()
+}
+
+/// Serve a pre-gzipped /api/day body with cache headers.
+fn cached_day_response(gz: &[u8], headers: &header::HeaderMap) -> Response {
+    let accepts_gzip = headers
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("gzip"))
+        .unwrap_or(false);
+    if accepts_gzip {
+        (
+            StatusCode::OK,
+            [
+                (header::CONTENT_ENCODING, "gzip"),
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "private, max-age=60"),
+            ],
+            Body::from(gz.to_vec()),
+        )
+            .into_response()
+    } else {
+        use std::io::Read;
+        let mut dec = flate2::read::GzDecoder::new(gz);
+        let mut plain = Vec::new();
+        let _ = dec.read_to_end(&mut plain);
+        (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "private, max-age=60"),
+            ],
+            Body::from(plain),
+        )
+            .into_response()
+    }
 }
 
 #[derive(Deserialize)]
@@ -507,6 +620,33 @@ impl Index {
 }
 
 /// Build a full index from sources (exposed for tests and tools).
+impl Index {
+    /// Session ids active on a local date (day-bucket or window fallback).
+    /// Public for the perf tool's day-load benchmark.
+    pub fn ids_for_day(&self, date: &str, t0: f64, t1: f64) -> Vec<String> {
+        match self.by_day.get(date) {
+            Some(pos) => pos.iter().map(|&i| self.rows[i].id.clone()).collect(),
+            None => self
+                .rows
+                .iter()
+                .filter(|r| r.t_start < t1 && r.t_end > t0)
+                .map(|r| r.id.clone())
+                .collect(),
+        }
+    }
+}
+
+/// Day bounds for a YYYY-MM-DD date as (t0, t1); exposed for the perf tool.
+pub fn test_day_bounds(date: &str) -> (f64, f64) {
+    let parts: Vec<&str> = date.split('-').collect();
+    let (y, m, d): (i32, i32, i32) = (
+        parts.first().and_then(|s| s.parse().ok()).unwrap_or(1970),
+        parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1),
+        parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(1),
+    );
+    day_range(y, m, d).unwrap_or((0.0, 0.0))
+}
+
 pub fn test_index(sources: &Sources) -> Index {
     let chunks = discover_chunks(sources)
         .into_iter()
@@ -521,6 +661,7 @@ pub fn app_with_index(sources: Sources, index: Index) -> Router {
         sources,
         index: Arc::new(std::sync::RwLock::new(Arc::new(index))),
         refreshing: Arc::new(AtomicBool::new(false)),
+        day_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
     Router::new()
         .route("/", get(shell))

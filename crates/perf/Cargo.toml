@@ -6,6 +6,7 @@ description = "Perf test tool for session-timeline key components (issue #8)"
 license = "MIT"
 
 [dependencies]
+rayon = "1.10"
 data-read = { path = "../data-read" }
 web-server = { path = "../web-server" }
 rusqlite = { version = "0.32", features = ["bundled"] }
