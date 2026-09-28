@@ -230,6 +230,9 @@ impl Index {
 // shared state + serve-stale refresh
 // ---------------------------------------------------------------------------
 
+/// date -> (fingerprint, pre-gzipped response body)
+type DayCache = std::sync::Mutex<HashMap<String, (u64, Vec<u8>)>>;
+
 #[derive(Clone)]
 struct AppState {
     sources: Sources,
@@ -240,7 +243,7 @@ struct AppState {
     /// The fingerprint covers the day's session-id set and the mtimes of the
     /// source files owning those sessions, so a live index refresh that does
     /// not touch the day's data keeps the cached body valid.
-    day_cache: Arc<std::sync::Mutex<HashMap<String, (u64, Vec<u8>)>>>,
+    day_cache: Arc<DayCache>,
 }
 
 impl AppState {
