@@ -102,7 +102,7 @@ function byDay() {
 }
 
 function fetchIndex() {
-  fetch('/api/index?days=120').then(r => r.json()).then(d => {
+  fetch('/api/index?days=730').then(r => r.json()).then(d => {
     INDEX = d; LAST_SIG = d.sig || null;
     $('#loading').style.display = 'none';
     if (!autoSelected) {
@@ -367,7 +367,7 @@ fetchIndex();
 // count + spans + max t_end). Re-rendering 10k sessions mid-hover is what
 // made the UI feel broken.
 setInterval(() => {
-  fetch('/api/index?days=120').then(r=>r.json()).then(d => {
+  fetch('/api/index?days=730').then(r=>r.json()).then(d => {
     if (d.sig && d.sig === LAST_SIG) return;      // nothing changed: no re-render
     LAST_SIG = d.sig;
     // day data is only stale for sessions that grew; drop just those days
