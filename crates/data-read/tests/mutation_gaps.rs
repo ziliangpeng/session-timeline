@@ -373,3 +373,335 @@ fn by_id_profile_matches_scan_profile() {
         .expect("by-id load must succeed for a scanned id");
     assert_eq!(by_id.id, scanned[0].id, "by-id id must equal scanned id");
 }
+
+// ---------- Compaction regressions (envelope + archived-history rendering) ----------
+// Each test below locks a real defect found on live data (Sep 2026), rebuilt
+// as a synthetic fixture. All timestamps are fake.
+
+/// Helper: archive rows 1-2 as compaction generation 1 (active=0, compacted=1).
+fn compact_gen1(path: &std::path::Path) {
+    for id in [1i64, 2] {
+        write_db_compacted(path, id);
+    }
+}
+
+fn write_db_compacted(path: &std::path::Path, msg_id: i64) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute(
+        "UPDATE messages SET active=0, compacted=1 WHERE id = ?1",
+        rusqlite::params![msg_id],
+    )
+    .unwrap();
+}
+
+#[test]
+fn by_id_envelope_covers_compacted_history() {
+    // Same defect as i1_envelope_covers_compacted_history, but through the
+    // BY-ID path: /api/session must not collapse a compacted session's extent
+    // to its post-compaction tail either.
+    let home = hermes_home("byid-envelope");
+    write_db(
+        &home.join("state.db"),
+        &[sess_row(
+            "s1",
+            Some("Bot Chat"),
+            None,
+            Some("cli"),
+            100.0,
+            900.0,
+        )],
+        &[
+            msg_row(1, "user", "day-1 message", 100.0, None, None, None),
+            msg_row(2, "assistant", "day-1 reply", 150.0, None, None, None),
+            msg_row(3, "user", "recent q", 800.0, None, None, None),
+            msg_row(4, "assistant", "recent a", 810.0, None, None, None),
+        ],
+    );
+    // compaction archived the day-1 exchange (real history)
+    compact_gen1(&home.join("state.db"));
+    let sources = Sources {
+        hermes_home: home.clone(),
+        prime_dir: None,
+    };
+    let scanned = scan_stats(&sources, 0.0, 1e9_f64, &ScanStats::default());
+    assert_eq!(scanned.len(), 1);
+    let by_id =
+        data_read::load_session_by_id(&sources, &scanned[0].id).expect("by-id load must succeed");
+    assert!(
+        (by_id.t_start - 100.0).abs() < 1e-9,
+        "by-id t_start must honor envelope, got {}",
+        by_id.t_start
+    );
+    assert!(
+        (by_id.t_end - 900.0).abs() < 1e-9,
+        "by-id t_end must honor envelope, got {}",
+        by_id.t_end
+    );
+    // and the archived turn renders: an inference span anchored at the day-1
+    // user row must exist (the 'empty shell' regression)
+    assert!(
+        by_id
+            .spans
+            .iter()
+            .any(|s| s.kind == SpanKind::Inference && (s.t_start - 100.0).abs() < 1e-9),
+        "by-id path must render compacted history turns, spans: {:?}",
+        by_id
+            .spans
+            .iter()
+            .map(|s| (s.kind, s.t_start))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn compacted_history_renders_on_earlier_day() {
+    // The ORIGINAL bug: envelope-only day coverage is not enough — the earlier
+    // day must carry actual turns. Day-1 spans must exist through the SCAN
+    // path with a window that covers only day 1.
+    let home = hermes_home("compact-day");
+    write_db(
+        &home.join("state.db"),
+        &[sess_row("s1", None, None, Some("cli"), 100.0, 100_000.0)],
+        &[
+            msg_row(1, "user", "day-1 q", 100.0, None, None, None),
+            msg_row(2, "assistant", "day-1 a", 200.0, None, None, None),
+            msg_row(3, "user", "day-2 q", 90_000.0, None, None, None),
+            msg_row(4, "assistant", "day-2 a", 90_100.0, None, None, None),
+        ],
+    );
+    compact_gen1(&home.join("state.db"));
+    // window covers ONLY day 1: [50, 300)
+    let ss = scan_stats(&srcs(&home), 50.0, 300.0, &ScanStats::default());
+    assert_eq!(ss.len(), 1, "session overlapping day 1 must be returned");
+    assert!(
+        (ss[0].t_start - 100.0).abs() < 1e-9,
+        "extent includes compacted day-1 history"
+    );
+    assert!(
+        ss[0]
+            .spans
+            .iter()
+            .any(|s| s.kind == SpanKind::Inference && (s.t_start - 100.0).abs() < 1e-9),
+        "day-1 compacted history must render an inference span"
+    );
+}
+
+#[test]
+fn rewind_twin_rows_do_not_double_render() {
+    // The DOUBLE-COUNT hazard of reading (active=1 OR compacted=1): a
+    // verbatim-tail row re-inserted as active pairs with its archived
+    // original (active=0, compacted=0 — the rewind class). The twin must NOT
+    // create a second rendering of the same wall-clock exchange.
+    let home = hermes_home("rewind-twin");
+    write_db(
+        &home.join("state.db"),
+        &[sess_row("s1", None, None, Some("tui"), 100.0, 400.0)],
+        &[
+            msg_row(1, "user", "q", 100.0, None, None, None),
+            msg_row(2, "assistant", "a", 150.0, None, None, None),
+            // re-inserted verbatim tail (active twin of row 2)
+            msg_row(3, "assistant", "a", 150.0, None, None, None),
+        ],
+    );
+    // archive the ORIGINAL of the re-inserted tail as rewind class
+    let conn = rusqlite::Connection::open(home.join("state.db")).unwrap();
+    conn.execute(
+        "UPDATE messages SET active=0, compacted=0, display_order=98 WHERE id=2",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    // filter is the thing under test: with the rewind original excluded, the
+    // active twin is the ONLY readable copy of that exchange
+    let conn = rusqlite::Connection::open(home.join("state.db")).unwrap();
+    let readable: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id='s1' AND (active=1 OR compacted=1)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    drop(conn);
+    assert_eq!(
+        readable, 2,
+        "rewind twin excluded: exactly the live rows are readable"
+    );
+    let ss = scan_stats(&srcs(&home), T0, T1, &ScanStats::default());
+    assert_eq!(ss.len(), 1);
+    let inference_starts: Vec<f64> = ss[0]
+        .spans
+        .iter()
+        .filter(|s| s.kind == SpanKind::Inference)
+        .map(|s| s.t_start)
+        .collect();
+    assert_eq!(
+        inference_starts,
+        vec![100.0],
+        "one inference span for one exchange, got {inference_starts:?}"
+    );
+}
+
+#[test]
+fn multi_generation_compaction_renders_once() {
+    // A session compacted TWICE carries two archived generations (both
+    // compacted=1) plus the active tail. If generations overlap in wall-clock
+    // time, the SAME exchange must not render twice.
+    let home = hermes_home("multi-gen");
+    write_db(
+        &home.join("state.db"),
+        &[sess_row("s1", None, None, Some("cli"), 100.0, 100_000.0)],
+        &[
+            msg_row(1, "user", "gen-1 q", 100.0, None, None, None),
+            msg_row(2, "assistant", "gen-1 a", 200.0, None, None, None),
+            msg_row(3, "user", "gen-2 q", 50_000.0, None, None, None),
+            msg_row(4, "assistant", "gen-2 a", 50_100.0, None, None, None),
+            msg_row(5, "user", "tail q", 90_000.0, None, None, None),
+            msg_row(6, "assistant", "tail a", 90_100.0, None, None, None),
+        ],
+    );
+    // generation 1 archived (rows 1-2)
+    write_db_compacted(&home.join("state.db"), 1);
+    write_db_compacted(&home.join("state.db"), 2);
+    // generation 2 archived (rows 3-4)
+    write_db_compacted(&home.join("state.db"), 3);
+    write_db_compacted(&home.join("state.db"), 4);
+    let ss = scan_stats(&srcs(&home), T0, T1, &ScanStats::default());
+    assert_eq!(ss.len(), 1);
+    let inference_starts: Vec<f64> = ss[0]
+        .spans
+        .iter()
+        .filter(|s| s.kind == SpanKind::Inference)
+        .map(|s| s.t_start)
+        .collect();
+    assert_eq!(
+        inference_starts,
+        vec![100.0, 50_000.0, 90_000.0],
+        "each generation renders its OWN window exactly once, got {inference_starts:?}"
+    );
+}
+#[test]
+fn archived_tail_copies_dedup_before_spans() {
+    // REAL defect found on live data: compaction keeps a verbatim tail; a
+    // SECOND compaction archives that tail again — the same exchange exists
+    // as TWO compacted=1 copies (identical role/timestamp/tool_call_id).
+    // Reading both double-renders: paired overlapping inference spans.
+    let home = hermes_home("tail-dedup");
+    let tc = r#"[{"function":{"name":"t","arguments":"{}"},"call_id":"c1"}]"#;
+    write_db(
+        &home.join("state.db"),
+        &[sess_row("s1", None, None, Some("cli"), 100.0, 900.0)],
+        &[
+            // generation 1 archive of the session's first exchange
+            msg_row(1, "user", "q", 100.0, None, None, None),
+            msg_row(2, "assistant", "", 150.0, None, Some(tc), None),
+            msg_row(3, "tool", "r", 160.0, None, None, Some("c1")),
+            // generation 2 archive of the SAME exchange (verbatim tail that
+            // gen-1 re-inserted, archived again by gen-2)
+            msg_row(4, "user", "q", 100.0, None, None, None),
+            msg_row(5, "assistant", "", 150.0, None, Some(tc), None),
+            msg_row(6, "tool", "r", 160.0, None, None, Some("c1")),
+            // active tail (different, later exchange)
+            msg_row(7, "user", "now q", 800.0, None, None, None),
+            msg_row(8, "assistant", "now a", 810.0, None, None, None),
+        ],
+    );
+    let conn = rusqlite::Connection::open(home.join("state.db")).unwrap();
+    // both generations archived as compaction history
+    for id in 1i64..=6 {
+        conn.execute(
+            "UPDATE messages SET active=0, compacted=1 WHERE id=?1",
+            rusqlite::params![id],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    let ss = scan_stats(&srcs(&home), T0, T1, &ScanStats::default());
+    assert_eq!(ss.len(), 1);
+    let inference_starts: Vec<f64> = ss[0]
+        .spans
+        .iter()
+        .filter(|s| s.kind == SpanKind::Inference)
+        .map(|s| s.t_start)
+        .collect();
+    assert_eq!(
+        inference_starts,
+        vec![100.0, 800.0],
+        "each exchange renders ONCE despite two archived copies, got {inference_starts:?}"
+    );
+    let tool_spans: Vec<&data_read::model::Span> = ss[0]
+        .spans
+        .iter()
+        .filter(|s| s.kind == SpanKind::Tool)
+        .collect();
+    assert_eq!(tool_spans.len(), 1, "one tool span for one tool call");
+}
+
+#[test]
+fn compaction_summary_rows_are_excluded() {
+    // Compaction inserts synthetic summary rows (role='user', pmid NULL,
+    // _compressed_summary=1). If read as real history they pollute the
+    // human-message count (kind classification) and idle 'you then said'
+    // previews with machine-generated summary text.
+    let home = hermes_home("summary-rows");
+    let conn = rusqlite::Connection::open(home.join("state.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, parent_session_id TEXT,
+            source TEXT, archived INTEGER DEFAULT 0, started_at REAL, ended_at REAL, last_activity_at REAL);
+         CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT,
+            timestamp REAL, active INTEGER DEFAULT 1, compacted INTEGER DEFAULT 0, _compressed_summary INTEGER DEFAULT 0, display_order INTEGER, platform_message_id TEXT,
+            tool_name TEXT, tool_call_id TEXT, tool_calls TEXT);",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO sessions VALUES ('s1', NULL, NULL, 'tui', 0, 100.0, 900.0, 900.0)",
+        [],
+    )
+    .unwrap();
+    // a subagent-looking session (parent set) whose ONLY user rows are
+    // compaction summaries — must stay kind=sub, not flip to human
+    conn.execute(
+        "INSERT INTO sessions VALUES ('s2', NULL, 's1', 'subagent', 0, 100.0, 900.0, 900.0)",
+        [],
+    )
+    .unwrap();
+    for (id, sess, role, content, ts, sum) in [
+        (1, "s1", "user", "real q", 100.0, 0),
+        (2, "s1", "assistant", "real a", 150.0, 0),
+        (
+            3,
+            "s2",
+            "user",
+            "[CONTEXT COMPACTION] summary text",
+            300.0,
+            1,
+        ),
+        (4, "s2", "assistant", "reply after summary", 320.0, 0),
+    ] {
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, timestamp, active, compacted, _compressed_summary, display_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, 0, ?6, ?1)",
+            rusqlite::params![id, sess, role, content, ts, sum],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    let ss = scan_stats(&srcs(&home), T0, T1, &ScanStats::default());
+    assert_eq!(ss.len(), 2);
+    for s in &ss {
+        if s.id.ends_with(":s2") {
+            assert!(
+                matches!(s.kind, data_read::model::SessionKind::Sub),
+                "summary-only user rows must not flip kind to human"
+            );
+            assert!(
+                !s.spans.iter().any(|sp| sp
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.next_user.clone())
+                    .map(|t| t.contains("CONTEXT COMPACTION"))
+                    .unwrap_or(false)),
+                "summary text must not appear as 'you then said' idle preview"
+            );
+        }
+    }
+}

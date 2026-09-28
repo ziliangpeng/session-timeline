@@ -523,7 +523,10 @@ fn q7_compacted_history_keeps_spans() {
         .spans
         .iter()
         .any(|s| s.kind == SpanKind::Inference && (s.t_start - 300.0).abs() < 1e-9);
-    assert!(early, "compacted early history must keep its inference span");
+    assert!(
+        early,
+        "compacted early history must keep its inference span"
+    );
     assert!(recent, "active recent rows keep their inference span");
     assert!(
         (ss[0].t_start - 100.0).abs() < 1e-9,
