@@ -38,8 +38,7 @@ fn write_two_day_fixture(home: &std::path::Path) -> (f64, f64) {
     // day 1 activity: 10:00 user, 10:01 assistant
     let a0 = day0 + 10.0 * 3600.0;
     let a1 = a0 + 60.0;
-    // overnight idle: 23:00 day1 → 08:00 day2
-    let n0 = day0 + 23.0 * 3600.0;
+    // overnight idle: 23:00 day1 → 08:00 day2 (n0 implicit in the turn times)
     let n1 = day1 + 8.0 * 3600.0;
     // day 2 activity: 08:00 user, 08:01 assistant
     let b0 = n1;
@@ -174,7 +173,7 @@ async fn cross_day_session_clips_per_day_keeps_carryover() {
     }
     // the overnight idle IS included on day 1 (it starts 23:00 that day)
     assert!(
-        spans1.iter().any(|(k, a, b)| *k == "idle" && *b > day1),
+        spans1.iter().any(|(k, _a, b)| *k == "idle" && *b > day1),
         "overnight idle must be present on day 1 with t_end past midnight: {spans1:?}"
     );
 
