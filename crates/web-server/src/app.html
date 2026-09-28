@@ -39,6 +39,9 @@
  .sub-row .seg.idle.carryover { opacity: .07; }
  .gl { position: absolute; top: 0; bottom: 0; width: 1px; background: #ffffff14; }
  .axisrow { margin-top: 1px; } .axis { height: 16px; background: none; }
+ .lane.agg { cursor: default; }
+ .lane.agg .lbl { color: #9fd0ff; font-family: ui-monospace, monospace; }
+ .lane.agg + .lane:not(.agg) { margin-top: 16px; }
  .tick { position: absolute; top: 2px; transform: translateX(-50%); color: #7c828d; font-size: 10px; white-space: nowrap; }
  .summary { color: #9fd0ff; margin: 1px 0 4px; font-family: ui-monospace, monospace; font-size: 12px; }
  .meta { color: #7c828d; font-size: 11px; margin: 0 0 4px; }
@@ -82,6 +85,7 @@
 // detail shard needed).
 let INDEX = null;            // /api/index response
 const DAY = {};              // date -> full sessions array (from /api/day)
+const AGG_TIPS = {};          // day-view aggregate row metadata (rebuilt per render)
 const $ = s => document.querySelector(s);
 const fmt = s => s >= 3600 ? (s/3600).toFixed(1)+'h' : s >= 60 ? Math.round(s/60)+'min' : Math.round(s)+'s';
 const dts = t => new Date(t*1000).toLocaleString([], {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
@@ -247,7 +251,40 @@ function renderDayView() {
     full.sort((a, b) => lastActiveToday(b) - lastActiveToday(a));
     const tk = ticks(day0, day1);
     const grid = tk.map(([t])=>`<div class="gl" style="left:${(t-day0)/86400*100}%"></div>`).join('');
-    let rows = '';
+    // aggregate rows: union of inference / tool coverage across ALL sessions
+    // on the day, unfiltered. Clip to the day window, then merge intervals.
+    const clipMerge = (kind) => {
+      const iv = [];
+      let nSessions = 0;
+      for (const s of DAY[state.day] || []) {
+        let hit = false;
+        for (const sp of s.spans) {
+          if (sp.kind !== kind) continue;
+          const a = Math.max(sp.t_start, day0), b = Math.min(sp.t_end, day1);
+          if (b > a) { iv.push([a, b]); hit = true; }
+        }
+        if (hit) nSessions++;
+      }
+      iv.sort((x, y) => x[0] - y[0]);
+      const merged = [];
+      let total = 0;
+      for (const [a, b] of iv) {
+        const last = merged[merged.length - 1];
+        if (last && a <= last[1]) { if (b > last[1]) { total += b - last[1]; last[1] = b; } }
+        else { merged.push([a, b]); total += b - a; }
+      }
+      return { merged, total, nSessions };
+    };
+    const agg = (kind, label, css) => {
+      const { merged, total, nSessions } = clipMerge(kind);
+      if (!merged.length) return '';
+      const segs = merged.map(([a,b]) =>
+        `<div class="seg ${css}" style="left:${(a-day0)/86400*100}%;width:${Math.max((b-a)/86400*100,0.05)}%"></div>`).join('');
+      const lane = `<div class="lane agg" data-agg="${kind}"><span class="lbl">${label}</span><div class="track">${grid}${segs}</div></div>`;
+      AGG_TIPS[kind] = { merged, total, nSessions };
+      return lane;
+    };
+    let rows = agg('inference', 'Σ inference', 'inference') + agg('tool', 'Σ tools', 'tool');
     for (const s of full) {
       const sorted = [...s.spans].sort((a,b)=>a.t_start-b.t_start);
       // day-clipped visible spans; boundary/long-idle flags are computed HERE
@@ -271,9 +308,20 @@ function renderDayView() {
     }
     const axis = tk.map(([t,l])=>`<span class="tick" style="left:${(t-day0)/86400*100}%">${l}</span>`).join('');
     sec.innerHTML = `<h2>${state.day} — all sessions on one clock</h2>
-      <p class="meta">click a row to expand that session below · hover any segment for detail</p>
+      <p class="meta">click a row to expand that session below · hover any segment for detail · Σ rows aggregate ALL sessions (filters do not apply)</p>
       ${rows}
       <div class="lane axisrow"><span class="lbl"></span><div class="track axis">${axis}</div></div>`;
+    sec.querySelectorAll('.lane.agg').forEach(el => {
+      const kind = el.dataset.agg;
+      const m = AGG_TIPS[kind];
+      if (!m) return;
+      const label = kind === 'inference' ? 'Σ inference (all sessions)' : 'Σ tools (all sessions)';
+      const rowsTxt = m.merged.map(([a,b]) => `${dts(a)} → ${dts(b)} (${fmt(b-a)})`).join('\n');
+      bindTip(el.querySelector('.track'), tipHtml([
+        [`${label} · ${fmt(m.total)} unioned`, `${m.nSessions} sessions contribute`],
+        [rowsTxt, '']
+      ]));
+    });
     sec.querySelectorAll('.lane[data-id]').forEach(el => {
       const s = findFull(decodeURIComponent(el.dataset.id));
       el.onclick = () => {
