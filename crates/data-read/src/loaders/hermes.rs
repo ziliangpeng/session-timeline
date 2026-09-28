@@ -1,10 +1,11 @@
 //! Hermes loader: per-profile SQLite `state.db` → unified sessions.
 //!
 //! Invariants carried from the validated prototype (each locked by a test):
-//!   1. active=1 rows only (compaction dead history excluded)
+//!   1. active=1 OR compacted=1 rows (compaction-archived history renders; rewind-superseded duplicates excluded)
 //!   2. injected user rows (platform_message_id set) never count as human input
 //!   3. malformed tool_calls payloads skip the row, never the profile
-//!   4. session extent from span/message timestamps, never row order
+//!   4. session extent from span/message timestamps unioned with the
+//!      sessions-table started_at, never row order
 //!   5. silence above GAP_CAP_S is idle, never inference
 //!   6. a broken DB is skipped with a warning, never a panic
 
@@ -119,7 +120,7 @@ pub fn load_profile_db(
         let mut msg_stmt = match conn.prepare(
             "SELECT role, tool_name, tool_call_id, tool_calls, content, timestamp, platform_message_id
              FROM messages WHERE session_id=?1 AND (active=1 OR compacted=1) AND COALESCE(_compressed_summary,0)=0
-             ORDER BY COALESCE(display_order, id)",
+             ORDER BY display_order, id",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -157,8 +158,8 @@ pub fn load_profile_db(
         // soft-archives history (active=0), which would otherwise collapse a
         // long-running session's t_start to the latest compaction point and
         // erase its earlier days. Union span extremes with the envelope so the
-        // session shows on every day it was actually alive (I1), while spans
-        // still come only from active rows (I6).
+        // session shows on every day it was actually alive (I1), while rewind-superseded
+        // duplicates (active=0, compacted=0) still produce no spans (I6).
         let env = env_start.zip(env_end).filter(|(s, e)| e >= s);
         if let Some(sess) = build_session(profile, &sid, title, parent, source, &msgs, env, stats) {
             out.push(sess);
@@ -375,11 +376,15 @@ fn build_session(
             msgs.iter().map(|m| m.ts).fold(f64::NEG_INFINITY, f64::max),
         )
     };
-    // Union with the sessions-table envelope (I1): compaction soft-archives
-    // history, so message rows alone under-report when a long session began.
-    let (t_start, t_end) = match env {
-        Some((es, ee)) => (t_start.min(es), t_end.max(ee)),
-        None => (t_start, t_end),
+    // Union with the sessions-table envelope START only (I1): compaction
+    // soft-archives history, so message rows alone under-report when a long
+    // session began. The envelope END is deliberately NOT trusted: ended_at is
+    // bulk-backfilled on some installs (many sessions share one identical
+    // timestamp far past their last message), which would smear sessions onto
+    // every day of a phantom window; the end comes from real rows instead.
+    let t_start = match env {
+        Some((es, _)) => t_start.min(es),
+        None => t_start,
     };
     if t_end < t_start {
         return None;
@@ -466,7 +471,7 @@ pub fn load_session_by_id(home: &Path, profile: &str, sid: &str) -> Option<Sessi
         .prepare(
             "SELECT role, tool_name, tool_call_id, tool_calls, content, timestamp, platform_message_id
              FROM messages WHERE session_id = ?1 AND (active = 1 OR compacted = 1) AND COALESCE(_compressed_summary,0) = 0
-             ORDER BY COALESCE(display_order, id)",
+             ORDER BY display_order, id",
         )
         .ok()?;
     let msgs: Vec<MsgRow> = stmt
