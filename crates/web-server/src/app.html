@@ -26,6 +26,8 @@
  .lane { display: flex; align-items: center; margin: 3px 0; }
  .lbl { width: 210px; color: #8a8f98; font-size: 11px; text-align: right; padding-right: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; cursor: pointer; }
  .lbl.sub { color: #5d636d; }
+ .lbl.prime { color: #e8b4f8; }
+ .lbl.sub.prime { color: #b587c9; }
  .track { position: relative; flex: 1; height: 16px; background: #1e2127; border-radius: 4px; }
  .seg { position: absolute; top: 1px; bottom: 1px; border-radius: 3px; min-width: 1px; }
  .seg.inference { background: #6c8ef5; }
@@ -40,6 +42,7 @@
  .summary { color: #9fd0ff; margin: 1px 0 4px; font-family: ui-monospace, monospace; font-size: 12px; }
  .meta { color: #7c828d; font-size: 11px; margin: 0 0 4px; }
  .sess-block h3 { font-size: 13px; margin: 0; }
+ .sess-block h2.prime-title { color: #e8b4f8; }
  #tip { position: fixed; background: #0f1116; border: 1px solid #3a3f47; border-radius: 8px; padding: 8px 10px; font-size: 12px; max-width: 420px; pointer-events: none; z-index: 50; display: none; box-shadow: 0 6px 24px #000a; }
  #tip .t { color: #9fd0ff; }
  #tip .m { color: #7c828d; margin-top: 3px; white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow: hidden; }
@@ -253,7 +256,7 @@ function renderDayView() {
         return `<div class="seg ${sp.kind}${carry}" style="left:${(a-day0)/86400*100}%;width:${Math.max((b-a)/86400*100,0.05)}%"></div>`;
       }).join('');
       rows += `<div class="lane ${s.kind==='sub'?'sub-row':''}" data-id="${encodeURIComponent(s.id)}">
-        <span class="lbl ${s.kind==='sub'?'sub':''}" title="${esc(s.title)}">${s.kind==='sub'?'↳ ':''}[${esc(s.profile||'?')}] ${esc(s.title)}</span>
+        <span class="lbl ${s.kind==='sub'?'sub':''}${s.id.startsWith('prime:')?' prime':''}" title="${esc(s.title)}">${s.kind==='sub'?'↳ ':''}[${esc(s.profile||'?')}] ${esc(s.title)}</span>
         <div class="track">${grid}${segs}</div></div>`;
     }
     const axis = tk.map(([t,l])=>`<span class="tick" style="left:${(t-day0)/86400*100}%">${l}</span>`).join('');
@@ -308,7 +311,7 @@ function renderSessionView() {
     }
     const axis = tk.map(([t,l])=>`<span class="tick" style="left:${(t-t0)/dur*100}%">${l}</span>`).join('');
     sec.innerHTML = `<div class="sess-block">
-      <h2>${esc(s.kind==='sub'?'↳ ':'')}${esc(s.title)}</h2>
+      <h2 class="${s.id.startsWith('prime:')?'prime-title':''}">${esc(s.kind==='sub'?'↳ ':'')}${esc(s.title)}</h2>
       <p class="summary">${fmt(s.t_end-s.t_start)} wall · ${s.spans.length} spans</p>
       <p class="meta">${esc(s.id)} · ${dts(s.t_start)} → ${dts(s.t_end)} · click a green segment for the tool call</p>
       ${rows}
