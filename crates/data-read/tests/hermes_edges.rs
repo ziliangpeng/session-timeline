@@ -124,7 +124,7 @@ fn hermes_archived_and_null_start_sessions_filtered() {
         "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, parent_session_id TEXT,
             source TEXT, archived INTEGER DEFAULT 0, started_at REAL, ended_at REAL, last_activity_at REAL);
          CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT,
-            timestamp REAL, active INTEGER DEFAULT 1, display_order INTEGER, platform_message_id TEXT,
+            timestamp REAL, active INTEGER DEFAULT 1, compacted INTEGER DEFAULT 0, display_order INTEGER, platform_message_id TEXT,
             tool_name TEXT, tool_call_id TEXT, tool_calls TEXT);",
     )
     .unwrap();

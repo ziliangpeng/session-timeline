@@ -118,7 +118,7 @@ pub fn load_profile_db(
     for (sid, title, parent, source, env_start, env_end) in rows {
         let mut msg_stmt = match conn.prepare(
             "SELECT role, tool_name, tool_call_id, tool_calls, content, timestamp, platform_message_id
-             FROM messages WHERE session_id=?1 AND active=1
+             FROM messages WHERE session_id=?1 AND (active=1 OR compacted=1)
              ORDER BY COALESCE(display_order, id)",
         ) {
             Ok(s) => s,
@@ -417,7 +417,7 @@ pub fn load_session_by_id(home: &Path, profile: &str, sid: &str) -> Option<Sessi
     let mut stmt = conn
         .prepare(
             "SELECT role, tool_name, tool_call_id, tool_calls, content, timestamp, platform_message_id
-             FROM messages WHERE session_id = ?1 AND active = 1
+             FROM messages WHERE session_id = ?1 AND (active = 1 OR compacted = 1)
              ORDER BY COALESCE(display_order, id)",
         )
         .ok()?;

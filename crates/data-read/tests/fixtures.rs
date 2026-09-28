@@ -117,6 +117,7 @@ pub fn write_db(path: &Path, sessions: &[Sess<'_>], msgs: &[Msg]) {
             content TEXT,
             timestamp REAL,
             active INTEGER DEFAULT 1,
+            compacted INTEGER DEFAULT 0,
             display_order INTEGER,
             platform_message_id TEXT,
             tool_name TEXT,
@@ -167,6 +168,17 @@ pub fn set_active(path: &Path, msg_id: i64, active: i64) {
     conn.execute(
         "UPDATE messages SET active = ?1 WHERE id = ?2",
         rusqlite::params![active, msg_id],
+    )
+    .unwrap();
+}
+
+/// Mark a message row compacted=1 (soft-archived real history kept for
+/// timeline rendering) vs compacted=0 (rewind-style superseded duplicate).
+pub fn set_compacted(path: &Path, msg_id: i64, compacted: i64) {
+    let conn = Connection::open(path).unwrap();
+    conn.execute(
+        "UPDATE messages SET compacted = ?1 WHERE id = ?2",
+        rusqlite::params![compacted, msg_id],
     )
     .unwrap();
 }

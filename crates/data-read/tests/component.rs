@@ -467,7 +467,8 @@ fn q7_active0_rows_are_excluded() {
             fixtures::msg_row(2, "assistant", "dead-history", 150.0, None, None, None),
         ],
     );
-    // mark the assistant row inactive (compaction dead history)
+    // mark the assistant row as a rewind-style superseded duplicate
+    // (active=0, compacted=0): excluded from spans entirely
     fixtures::set_active(&home.join("state.db"), 2, 0);
     let ss = scan_stats(&sources_p(&home), T0, T1, &ScanStats::default());
     assert_eq!(ss.len(), 1);
@@ -482,6 +483,53 @@ fn q7_active0_rows_are_excluded() {
         .spans
         .iter()
         .any(|s| s.meta.as_ref().and_then(|m| m.output.as_deref()) == Some("dead-history")));
+}
+
+#[test]
+fn q7_compacted_history_keeps_spans() {
+    // Compaction soft-archives real history as active=0 compacted=1 — those
+    // rows are the session's earlier days and MUST still produce spans
+    // (turns), unlike rewind-style superseded duplicates (compacted=0).
+    let home = hermes_home("q7_compacted");
+    fixtures::write_db(
+        &home.join("state.db"),
+        &[fixtures::sess_row(
+            "s1",
+            None,
+            None,
+            Some("cli"),
+            100.0,
+            400.0,
+        )],
+        &[
+            fixtures::msg_row(1, "user", "early q", 100.0, None, None, None),
+            fixtures::msg_row(2, "assistant", "early a", 120.0, None, None, None),
+            fixtures::msg_row(3, "user", "recent q", 300.0, None, None, None),
+            fixtures::msg_row(4, "assistant", "recent a", 320.0, None, None, None),
+        ],
+    );
+    // rows 1-2: compaction-archived REAL history (active=0, compacted=1)
+    fixtures::set_active(&home.join("state.db"), 1, 0);
+    fixtures::set_compacted(&home.join("state.db"), 1, 1);
+    fixtures::set_active(&home.join("state.db"), 2, 0);
+    fixtures::set_compacted(&home.join("state.db"), 2, 1);
+    let ss = scan_stats(&sources_p(&home), T0, T1, &ScanStats::default());
+    assert_eq!(ss.len(), 1);
+    let early = ss[0]
+        .spans
+        .iter()
+        .any(|s| s.kind == SpanKind::Inference && (s.t_start - 100.0).abs() < 1e-9);
+    let recent = ss[0]
+        .spans
+        .iter()
+        .any(|s| s.kind == SpanKind::Inference && (s.t_start - 300.0).abs() < 1e-9);
+    assert!(early, "compacted early history must keep its inference span");
+    assert!(recent, "active recent rows keep their inference span");
+    assert!(
+        (ss[0].t_start - 100.0).abs() < 1e-9,
+        "extent covers compacted history, got {}",
+        ss[0].t_start
+    );
 }
 
 #[test]
