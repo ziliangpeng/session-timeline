@@ -544,13 +544,16 @@ fn q7_extent_from_span_extremes_not_row_order() {
     let tc = r#"[{"function":{"name":"t","arguments":"{}"},"call_id":"c"}]"#;
     fixtures::write_db(
         &home.join("state.db"),
+        // envelope end must sit STRICTLY below the span max (130) so the
+        // t_end assertion can only be satisfied by span extremes, and start
+        // strictly above the span min (100) so t_start discriminates too.
         &[fixtures::sess_row(
             "s1",
             None,
             None,
             Some("tui"),
             110.0,
-            130.0,
+            125.0,
         )],
         &[
             fixtures::msg_row(1, "user", "q", 100.0, None, None, None),
@@ -601,9 +604,11 @@ fn i1_envelope_covers_compacted_history() {
         "t_start must honor envelope start, got {}",
         ss[0].t_start
     );
+    // envelope END is deliberately not trusted (bulk-backfilled ended_at smears
+    // sessions across phantom days): t_end must come from real rows only.
     assert!(
-        (ss[0].t_end - 900.0).abs() < 1e-9,
-        "t_end must honor envelope end, got {}",
+        (ss[0].t_end - 810.0).abs() < 1e-9,
+        "t_end must come from message rows, not the envelope end, got {}",
         ss[0].t_end
     );
 }

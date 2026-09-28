@@ -432,9 +432,11 @@ fn by_id_envelope_covers_compacted_history() {
         "by-id t_start must honor envelope, got {}",
         by_id.t_start
     );
+    // envelope END is deliberately not trusted (bulk-backfilled ended_at);
+    // t_end comes from real rows on this path too.
     assert!(
-        (by_id.t_end - 900.0).abs() < 1e-9,
-        "by-id t_end must honor envelope, got {}",
+        (by_id.t_end - 810.0).abs() < 1e-9,
+        "by-id t_end must come from message rows, got {}",
         by_id.t_end
     );
     // and the archived turn renders: an inference span anchored at the day-1
@@ -704,4 +706,64 @@ fn compaction_summary_rows_are_excluded() {
             );
         }
     }
+}
+
+#[test]
+fn inverted_envelope_falls_back_to_message_extent() {
+    // ended_at < started_at (corrupt row): the window filter keys on
+    // started_at, and the envelope guard drops the inverted pair — extent
+    // falls back to message/spans and the session still renders its real
+    // message window.
+    let home = hermes_home("inverted-env");
+    write_db(
+        &home.join("state.db"),
+        // started_at 100 (real), ended_at corrupted to 50 (inverted)
+        &[sess_row("s1", None, None, Some("tui"), 100.0, 50.0)],
+        &[
+            msg_row(1, "user", "q", 100.0, None, None, None),
+            msg_row(2, "assistant", "a", 150.0, None, None, None),
+        ],
+    );
+    // wide window: exercises the envelope guard, not the window filter
+    let ss = scan_stats(&srcs(&home), 0.0, 1e9_f64, &ScanStats::default());
+    assert_eq!(ss.len(), 1, "session kept despite inverted ended_at");
+    assert!(
+        (ss[0].t_start - 100.0).abs() < 1e-9 && (ss[0].t_end - 150.0).abs() < 1e-9,
+        "extent from messages, got [{}, {}]",
+        ss[0].t_start,
+        ss[0].t_end
+    );
+}
+
+#[test]
+fn by_id_matches_scan_extent_and_spans() {
+    // The by-id path must agree with the scan path on extent AND span count
+    // (not just id) — otherwise a query edited on one path silently diverges.
+    let home = hermes_home("byid-full");
+    write_db(
+        &home.join("state.db"),
+        &[sess_row("s1", None, None, Some("cli"), 100.0, 100_000.0)],
+        &[
+            msg_row(1, "user", "day-1 q", 100.0, None, None, None),
+            msg_row(2, "assistant", "day-1 a", 200.0, None, None, None),
+            msg_row(3, "user", "recent q", 90_000.0, None, None, None),
+            msg_row(4, "assistant", "recent a", 90_100.0, None, None, None),
+        ],
+    );
+    write_db_compacted(&home.join("state.db"), 1);
+    write_db_compacted(&home.join("state.db"), 2);
+    let sources = Sources {
+        hermes_home: home.clone(),
+        prime_dir: None,
+    };
+    let scanned = scan_stats(&sources, 0.0, 1e9_f64, &ScanStats::default());
+    assert_eq!(scanned.len(), 1);
+    let by_id = data_read::load_session_by_id(&sources, &scanned[0].id).unwrap();
+    assert_eq!(by_id.t_start, scanned[0].t_start, "extent start agrees");
+    assert_eq!(by_id.t_end, scanned[0].t_end, "extent end agrees");
+    assert_eq!(
+        by_id.spans.len(),
+        scanned[0].spans.len(),
+        "span count agrees"
+    );
 }

@@ -44,7 +44,7 @@ mod synth {
             );
             CREATE TABLE messages (
                 id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT,
-                timestamp REAL, active INTEGER DEFAULT 1, display_order INTEGER,
+                timestamp REAL, active INTEGER DEFAULT 1, compacted INTEGER DEFAULT 0, _compressed_summary INTEGER DEFAULT 0, display_order INTEGER,
                 platform_message_id TEXT, tool_name TEXT, tool_call_id TEXT, tool_calls TEXT
             );",
         )

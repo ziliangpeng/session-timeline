@@ -78,14 +78,17 @@ silence longer than the gap cap        = IDLE (long silence), never inference
 
 1. Sessions appear on **every day they have activity on**, not just their start
    day (long-lived chats must stay visible on later days).
-2. Session extent derives from span/message timestamps, never row order
-   (post-compaction rows can be out of order → negative durations).
+2. Session extent derives from span/message timestamps unioned with the
+   sessions-table envelope start (compaction soft-archives early history), never
+   row order (post-compaction rows can be out of order → negative durations).
 3. Harness-injected user rows never count as human input (subagent sessions
    classify correctly; "waiting-for-user" is honest).
 4. Silence above the gap cap is idle, never inference (self-driving periods
    must not be attributed to the model).
 5. One malformed record never loses a profile's other sessions.
-6. Compaction dead history (superseded rows) is excluded.
+6. Rewind-superseded duplicate rows are excluded; compaction-archived history
+   (the session's real earlier days) still renders, deduplicated when compaction
+   generations overlap.
 
 ## Non-goals
 

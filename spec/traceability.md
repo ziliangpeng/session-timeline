@@ -28,12 +28,12 @@ that lock it. A missing cell = a coverage hole. Regenerate evidence with
 
 | # | Spec statement | Implementation | Locking tests |
 |---|----------------|----------------|---------------|
-| I1 | Sessions appear on every day they have activity on | server: `active_days()` + per-day bucket in web-server/src/lib.rs | day_endpoint_catches_cross_day_session_via_index; day_returns_full_sessions_active_that_day |
-| I2 | Session extent from span/message timestamps, never row order | `build_session` extent = min/max over spans (fallback: message ts) | q7_extent_from_span_extremes_not_row_order |
+| I1 | Sessions appear on every day they have activity on | server: `active_days()` + per-day bucket in web-server/src/lib.rs; hermes loader: extent start unioned with sessions-table `started_at` so compaction-soft-archived early days stay visible | day_endpoint_catches_cross_day_session_via_index; day_returns_full_sessions_active_that_day; i1_envelope_covers_compacted_history |
+| I2 | Session extent from span/message extremes unioned with the sessions-table envelope start, never row order | `build_session` extent = min/max over spans (fallback: message ts), then `.min(envelope start)` | q7_extent_from_span_extremes_not_row_order |
 | I3 | Harness-injected user rows never count as human input | hermes: `platform_message_id IS NULL` filter for human count | q5_injected_user_messages_do_not_make_a_session_human |
 | I4 | Silence above gap cap is idle, never inference | same as S4 | q7_silence_over_gap_cap, prime_long_silence |
 | I5 | One malformed record never loses a profile's other sessions | row/session/source-level try-skip + `ScanStats` counters (Q4) | q4_broken_source_is_skipped_and_counted, q4_malformed_tool_calls_row_is_counted_not_fatal, q4_corrupt_prime_line_is_skipped_not_fatal, cli_broken_hermes_db_is_warning_not_failure |
-| I6 | Compaction dead history excluded | `active=1` filter in messages query | q7_active0_rows_are_excluded |
+| I6 | Rewind-superseded duplicate rows excluded; compaction-archived history renders | hermes: `(active=1 OR compacted=1) AND COALESCE(_compressed_summary,0)=0` filter; archived copies deduped by (role, ts, tool_call_id, pmid) before span building | q7_active0_rows_are_excluded; q7_compacted_history_keeps_spans; archived_tail_copies_dedup_before_spans; compaction_summary_rows_are_excluded |
 
 ### Open-question rulings folded in from grill sessions
 
