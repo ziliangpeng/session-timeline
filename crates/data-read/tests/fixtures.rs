@@ -118,6 +118,7 @@ pub fn write_db(path: &Path, sessions: &[Sess<'_>], msgs: &[Msg]) {
             timestamp REAL,
             active INTEGER DEFAULT 1,
             compacted INTEGER DEFAULT 0,
+            _compressed_summary INTEGER DEFAULT 0,
             display_order INTEGER,
             platform_message_id TEXT,
             tool_name TEXT,

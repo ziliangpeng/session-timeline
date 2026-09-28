@@ -118,7 +118,7 @@ pub fn load_profile_db(
     for (sid, title, parent, source, env_start, env_end) in rows {
         let mut msg_stmt = match conn.prepare(
             "SELECT role, tool_name, tool_call_id, tool_calls, content, timestamp, platform_message_id
-             FROM messages WHERE session_id=?1 AND (active=1 OR compacted=1)
+             FROM messages WHERE session_id=?1 AND (active=1 OR compacted=1) AND COALESCE(_compressed_summary,0)=0
              ORDER BY COALESCE(display_order, id)",
         ) {
             Ok(s) => s,
@@ -148,6 +148,10 @@ pub fn load_profile_db(
         if msgs.is_empty() {
             continue;
         }
+        // Compaction can archive the same exchange twice (verbatim tail from an
+        // earlier compaction gets archived again by a later one). Drop the
+        // duplicates before span building or the exchange double-renders.
+        let msgs = dedup_archived_copies(msgs);
         // Envelope from the sessions table (started_at / last activity). Message
         // rows only cover the post-compaction tail: in-place compaction
         // soft-archives history (active=0), which would otherwise collapse a
@@ -171,6 +175,50 @@ struct MsgRow {
     content: Option<String>,
     ts: f64,
     pmid: Option<String>,
+}
+
+/// Deduplicate archived copies of the same exchange.
+///
+/// Compaction keeps a verbatim tail when it archives history, and a SECOND
+/// compaction archives that tail again — so the same exchange can exist as
+/// two archived copies (both `compacted=1`, identical role/timestamp/
+/// tool_call_id). Reading both double-renders the exchange. When copies
+/// differ, the one with more content wins (the re-inserted tail is the
+/// harness's own verbatim copy). Returns rows in display order.
+fn dedup_archived_copies(msgs: Vec<MsgRow>) -> Vec<MsgRow> {
+    // key (role, ts, tool_call_id, pmid) identifies one exchange row.
+    use std::collections::{HashMap, HashSet};
+    let mut best: HashMap<(String, u64, Option<String>, Option<String>), usize> = HashMap::new();
+    let mut dropped: HashSet<usize> = HashSet::new();
+    for (i, m) in msgs.iter().enumerate() {
+        // timestamp keyed by bits: identical copies share exact f64 values
+        let key = (
+            m.role.clone(),
+            m.ts.to_bits(),
+            m.tool_call_id.clone(),
+            m.pmid.clone(),
+        );
+        match best.get(&key) {
+            Some(&j) => {
+                let jl = msgs[j].content.as_deref().map(str::len).unwrap_or(0);
+                let il = m.content.as_deref().map(str::len).unwrap_or(0);
+                if il > jl {
+                    dropped.insert(j);
+                    best.insert(key, i);
+                } else {
+                    dropped.insert(i);
+                }
+            }
+            None => {
+                best.insert(key, i);
+            }
+        }
+    }
+    msgs.into_iter()
+        .enumerate()
+        .filter(|(i, _)| !dropped.contains(i))
+        .map(|(_, m)| m)
+        .collect()
 }
 
 fn build_session(
@@ -417,7 +465,7 @@ pub fn load_session_by_id(home: &Path, profile: &str, sid: &str) -> Option<Sessi
     let mut stmt = conn
         .prepare(
             "SELECT role, tool_name, tool_call_id, tool_calls, content, timestamp, platform_message_id
-             FROM messages WHERE session_id = ?1 AND (active = 1 OR compacted = 1)
+             FROM messages WHERE session_id = ?1 AND (active = 1 OR compacted = 1) AND COALESCE(_compressed_summary,0) = 0
              ORDER BY COALESCE(display_order, id)",
         )
         .ok()?;
@@ -439,6 +487,8 @@ pub fn load_session_by_id(home: &Path, profile: &str, sid: &str) -> Option<Sessi
     if msgs.is_empty() {
         return None;
     }
+    // same duplicate-archived-copy hazard as the scan path
+    let msgs = dedup_archived_copies(msgs);
     let env = env_start.zip(env_end).filter(|(s, e)| e >= s);
     build_session(
         profile,

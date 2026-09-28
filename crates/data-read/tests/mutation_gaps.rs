@@ -579,3 +579,129 @@ fn multi_generation_compaction_renders_once() {
         "each generation renders its OWN window exactly once, got {inference_starts:?}"
     );
 }
+#[test]
+fn archived_tail_copies_dedup_before_spans() {
+    // REAL defect found on live data: compaction keeps a verbatim tail; a
+    // SECOND compaction archives that tail again — the same exchange exists
+    // as TWO compacted=1 copies (identical role/timestamp/tool_call_id).
+    // Reading both double-renders: paired overlapping inference spans.
+    let home = hermes_home("tail-dedup");
+    let tc = r#"[{"function":{"name":"t","arguments":"{}"},"call_id":"c1"}]"#;
+    write_db(
+        &home.join("state.db"),
+        &[sess_row("s1", None, None, Some("cli"), 100.0, 900.0)],
+        &[
+            // generation 1 archive of the session's first exchange
+            msg_row(1, "user", "q", 100.0, None, None, None),
+            msg_row(2, "assistant", "", 150.0, None, Some(tc), None),
+            msg_row(3, "tool", "r", 160.0, None, None, Some("c1")),
+            // generation 2 archive of the SAME exchange (verbatim tail that
+            // gen-1 re-inserted, archived again by gen-2)
+            msg_row(4, "user", "q", 100.0, None, None, None),
+            msg_row(5, "assistant", "", 150.0, None, Some(tc), None),
+            msg_row(6, "tool", "r", 160.0, None, None, Some("c1")),
+            // active tail (different, later exchange)
+            msg_row(7, "user", "now q", 800.0, None, None, None),
+            msg_row(8, "assistant", "now a", 810.0, None, None, None),
+        ],
+    );
+    let conn = rusqlite::Connection::open(home.join("state.db")).unwrap();
+    // both generations archived as compaction history
+    for id in 1i64..=6 {
+        conn.execute(
+            "UPDATE messages SET active=0, compacted=1 WHERE id=?1",
+            rusqlite::params![id],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    let ss = scan_stats(&srcs(&home), T0, T1, &ScanStats::default());
+    assert_eq!(ss.len(), 1);
+    let inference_starts: Vec<f64> = ss[0]
+        .spans
+        .iter()
+        .filter(|s| s.kind == SpanKind::Inference)
+        .map(|s| s.t_start)
+        .collect();
+    assert_eq!(
+        inference_starts,
+        vec![100.0, 800.0],
+        "each exchange renders ONCE despite two archived copies, got {inference_starts:?}"
+    );
+    let tool_spans: Vec<&data_read::model::Span> = ss[0]
+        .spans
+        .iter()
+        .filter(|s| s.kind == SpanKind::Tool)
+        .collect();
+    assert_eq!(tool_spans.len(), 1, "one tool span for one tool call");
+}
+
+#[test]
+fn compaction_summary_rows_are_excluded() {
+    // Compaction inserts synthetic summary rows (role='user', pmid NULL,
+    // _compressed_summary=1). If read as real history they pollute the
+    // human-message count (kind classification) and idle 'you then said'
+    // previews with machine-generated summary text.
+    let home = hermes_home("summary-rows");
+    let conn = rusqlite::Connection::open(home.join("state.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, parent_session_id TEXT,
+            source TEXT, archived INTEGER DEFAULT 0, started_at REAL, ended_at REAL, last_activity_at REAL);
+         CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT,
+            timestamp REAL, active INTEGER DEFAULT 1, compacted INTEGER DEFAULT 0, _compressed_summary INTEGER DEFAULT 0, display_order INTEGER, platform_message_id TEXT,
+            tool_name TEXT, tool_call_id TEXT, tool_calls TEXT);",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO sessions VALUES ('s1', NULL, NULL, 'tui', 0, 100.0, 900.0, 900.0)",
+        [],
+    )
+    .unwrap();
+    // a subagent-looking session (parent set) whose ONLY user rows are
+    // compaction summaries — must stay kind=sub, not flip to human
+    conn.execute(
+        "INSERT INTO sessions VALUES ('s2', NULL, 's1', 'subagent', 0, 100.0, 900.0, 900.0)",
+        [],
+    )
+    .unwrap();
+    for (id, sess, role, content, ts, sum) in [
+        (1, "s1", "user", "real q", 100.0, 0),
+        (2, "s1", "assistant", "real a", 150.0, 0),
+        (
+            3,
+            "s2",
+            "user",
+            "[CONTEXT COMPACTION] summary text",
+            300.0,
+            1,
+        ),
+        (4, "s2", "assistant", "reply after summary", 320.0, 0),
+    ] {
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, timestamp, active, compacted, _compressed_summary, display_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, 0, ?6, ?1)",
+            rusqlite::params![id, sess, role, content, ts, sum],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    let ss = scan_stats(&srcs(&home), T0, T1, &ScanStats::default());
+    assert_eq!(ss.len(), 2);
+    for s in &ss {
+        if s.id.ends_with(":s2") {
+            assert!(
+                matches!(s.kind, data_read::model::SessionKind::Sub),
+                "summary-only user rows must not flip kind to human"
+            );
+            assert!(
+                !s.spans.iter().any(|sp| sp
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.next_user.clone())
+                    .map(|t| t.contains("CONTEXT COMPACTION"))
+                    .unwrap_or(false)),
+                "summary text must not appear as 'you then said' idle preview"
+            );
+        }
+    }
+}
