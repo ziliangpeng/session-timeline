@@ -650,6 +650,13 @@ pub fn test_day_bounds(date: &str) -> (f64, f64) {
     day_range(y, m, d).unwrap_or((0.0, 0.0))
 }
 
+/// Local date string (YYYY-MM-DD) for a timestamp; perf/test helper.
+pub fn test_day_bounds_date(t: f64) -> String {
+    let (t0, date, _t1) = day_bounds(t);
+    let _ = t0;
+    date
+}
+
 pub fn test_index(sources: &Sources) -> Index {
     let chunks = discover_chunks(sources)
         .into_iter()

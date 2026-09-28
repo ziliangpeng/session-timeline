@@ -154,7 +154,7 @@ async fn index_returns_sessions_with_days() {
 }
 
 #[tokio::test]
-async fn day_returns_full_sessions_active_that_day() {
+async fn day_returns_clipped_sessions_active_that_day() {
     // figure out "today" local date from the index, then ask the day endpoint
     let (_, idx) = get_json("/api/index?days=1").await;
     let some_day = idx["sessions"][0]["days"][0]
@@ -165,7 +165,19 @@ async fn day_returns_full_sessions_active_that_day() {
     assert_eq!(status, StatusCode::OK);
     let sessions = json["sessions"].as_array().expect("sessions");
     assert!(!sessions.is_empty(), "day has sessions");
-    // full session objects: spans included
+    // day payload carries only spans overlapping the day window; every span
+    // must intersect [day0, day1) — clipping invariant (perf PR #21)
+    let day0 = web_server::test_day_bounds(&some_day).0;
+    let day1 = web_server::test_day_bounds(&some_day).1;
+    for s in sessions {
+        for sp in s["spans"].as_array().unwrap_or(&Vec::new()) {
+            let b = sp["t_end"].as_f64().unwrap();
+            assert!(
+                sp["t_start"].as_f64().unwrap() < day1 && b > day0,
+                "clipped day span escapes the day window: {sp:?}"
+            );
+        }
+    }
     let with_spans = sessions.iter().any(|s| {
         s["spans"]
             .as_array()
