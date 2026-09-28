@@ -34,6 +34,7 @@
  .seg.tool { background: #3fb28f; }
  .seg.idle { background: #8a8f98; opacity: .5; }
  .seg.idle.carryover { opacity: .12; }
+ .seg.idle.light { opacity: .25; }
  .sub-row .seg { opacity: .55; }
  .sub-row .seg.idle.carryover { opacity: .07; }
  .gl { position: absolute; top: 0; bottom: 0; width: 1px; background: #ffffff14; }
@@ -249,11 +250,20 @@ function renderDayView() {
     let rows = '';
     for (const s of full) {
       const sorted = [...s.spans].sort((a,b)=>a.t_start-b.t_start);
-      const segs = sorted.map(sp => {
-        const a = Math.max(sp.t_start, day0), b = Math.min(sp.t_end, day1);
-        if (b <= a) return '';
+      // day-clipped visible spans; boundary/long-idle flags are computed HERE
+      // (per lane, per day — never cached in the data model)
+      const vis = sorted.map(sp => ({sp, a: Math.max(sp.t_start, day0), b: Math.min(sp.t_end, day1)}))
+                        .filter(v => v.b > v.a);
+      const idleIdx = vis.map((v,i) => v.sp.kind==='idle' ? i : -1).filter(i => i >= 0);
+      const light = new Set();
+      if (idleIdx.length) {
+        light.add(idleIdx[0]); light.add(idleIdx[idleIdx.length-1]);      // boundary idles
+        for (const i of idleIdx) if (vis[i].b - vis[i].a > 3600) light.add(i); // >1h (clipped)
+      }
+      const segs = vis.map(({sp,a,b}, i) => {
         const carry = sp.kind === 'idle' && sp.t_start < day0 ? ' carryover' : '';
-        return `<div class="seg ${sp.kind}${carry}" style="left:${(a-day0)/86400*100}%;width:${Math.max((b-a)/86400*100,0.05)}%"></div>`;
+        const lite = sp.kind === 'idle' && !carry && light.has(i) ? ' light' : '';
+        return `<div class="seg ${sp.kind}${carry}${lite}" style="left:${(a-day0)/86400*100}%;width:${Math.max((b-a)/86400*100,0.05)}%"></div>`;
       }).join('');
       rows += `<div class="lane ${s.kind==='sub'?'sub-row':''}" data-id="${encodeURIComponent(s.id)}">
         <span class="lbl ${s.kind==='sub'?'sub':''}${s.id.startsWith('prime:')?' prime':''}" title="${esc(s.title)}">${s.kind==='sub'?'↳ ':''}[${esc(s.profile||'?')}] ${esc(s.title)}</span>
