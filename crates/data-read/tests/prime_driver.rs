@@ -12,7 +12,7 @@ fn tmpdir(tag: &str) -> std::path::PathBuf {
     d
 }
 
-fn write_session(dir: &std::path::PathBuf, lines: &[String]) -> std::path::PathBuf {
+fn write_session(dir: &std::path::Path, lines: &[String]) -> std::path::PathBuf {
     let f = dir.join("s1.jsonl");
     let mut fh = std::fs::File::create(&f).unwrap();
     for l in lines {
