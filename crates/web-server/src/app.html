@@ -360,7 +360,11 @@ function renderDayView() {
     });
   };
   if (DAY[state.day]) render();
-  else fetch('/api/day?date='+state.day).then(r=>r.json()).then(d => { DAY[state.day] = d.sessions; render(); });
+  else fetch('/api/day?date='+state.day).then(r=>r.json()).then(d => {
+    DAY[state.day] = d.sessions;
+    render();
+    renderFilters(); // autobeats count derives from day spans — refresh after load
+  });
 }
 
 function renderSessionView() {
