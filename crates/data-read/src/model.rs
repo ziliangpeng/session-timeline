@@ -51,6 +51,11 @@ pub struct Meta {
     pub next_user: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// What drove this span when it was not the human user: Prime heartbeats
+    /// (scheduled prompts) and refinements (self-tuning passes) run without
+    /// user activity. `None` = user-driven (or unknown/harness).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
 }
 
 /// Human-pace classification, derived by the loader.

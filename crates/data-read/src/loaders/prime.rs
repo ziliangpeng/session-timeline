@@ -180,6 +180,11 @@ fn load_file(f: &Path, t0: f64, t1: f64) -> Option<Session> {
     let file = std::fs::File::open(f).ok()?;
     let reader = std::io::BufReader::new(file);
     let mut msgs: Vec<(String, f64, serde_json::Value)> = Vec::new(); // (role, ts, message)
+    // Autonomy markers: Prime schedules work without user activity via
+    // `custom_message` heartbeat prompts and records self-tuning `custom`
+    // refinement events. Spans overlapping a marker get its driver tag so the
+    // UI can recolor or hide them; real user turns stay untagged.
+    let mut drivers: Vec<(f64, &'static str)> = Vec::new(); // (ts, driver)
     for rdr in reader.lines() {
         let ln = rdr.unwrap_or_default();
         let ev = match serde_json::from_str::<serde_json::Value>(&ln) {
@@ -187,6 +192,14 @@ fn load_file(f: &Path, t0: f64, t1: f64) -> Option<Session> {
             Err(_) => continue, // invariant: one malformed line never kills the file
         };
         if ev.get("type").and_then(|t| t.as_str()) != Some("message") {
+            if let Some(t) = ts(ev.get("timestamp").and_then(|t| t.as_str()).unwrap_or("")) {
+                match ev.get("customType").and_then(|c| c.as_str()) {
+                    Some("heartbeat_prompt") => drivers.push((t, "heartbeat")),
+                    Some("prime-agent.refinement") | Some("refinement_outcome")
+                    | Some("refinement_notice") => drivers.push((t, "refinement")),
+                    _ => {}
+                }
+            }
             continue;
         }
         let Some(m) = ev.get("message") else { continue };
@@ -217,6 +230,42 @@ fn load_file(f: &Path, t0: f64, t1: f64) -> Option<Session> {
         SessionKind::Sub
     } else {
         SessionKind::Human
+    };
+
+    // driver windows: [marker_ts, next_user_ts) for heartbeats; refinement
+    // activity is attributed to spans starting within 300s after a marker
+    // (the refine.run tool call + the model call that chose it).
+    let user_ts: Vec<f64> = msgs
+        .iter()
+        .filter(|(r, _, _)| r == "user")
+        .map(|(_, t, _)| *t)
+        .collect();
+    let next_user_after = |t: f64| -> f64 {
+        user_ts
+            .iter()
+            .cloned()
+            .filter(|u| *u > t)
+            .fold(f64::INFINITY, f64::min)
+    };
+    let driver_at = |t: f64| -> Option<&'static str> {
+        let mut best: Option<&'static str> = None;
+        for (mt, d) in &drivers {
+            match *d {
+                "heartbeat" => {
+                    // active until the next real user message turns the session
+                    // back to human-driven
+                    if *mt <= t && t < next_user_after(*mt) {
+                        best = Some("heartbeat");
+                    }
+                }
+                _ => {
+                    if *mt <= t && t - *mt <= 300.0 {
+                        best = Some("refinement");
+                    }
+                }
+            }
+        }
+        best
     };
 
     let mut spans: Vec<Span> = Vec::new();
@@ -264,6 +313,7 @@ fn load_file(f: &Path, t0: f64, t1: f64) -> Option<Session> {
                                 output: Some(preview(&ptext(
                                     m.get("content").unwrap_or(&serde_json::Value::Null),
                                 ))),
+                                driver: driver_at(prev).map(|s| s.to_string()),
                                 ..Default::default()
                             }),
                         });
@@ -317,6 +367,7 @@ fn load_file(f: &Path, t0: f64, t1: f64) -> Option<Session> {
                             result: Some(preview(&ptext(
                                 m.get("content").unwrap_or(&serde_json::Value::Null),
                             ))),
+                            driver: driver_at(start).map(|s| s.to_string()),
                             ..Default::default()
                         }),
                     });
