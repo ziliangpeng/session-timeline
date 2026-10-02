@@ -32,6 +32,8 @@
  .seg { position: absolute; top: 1px; bottom: 1px; border-radius: 3px; min-width: 1px; }
  .seg.inference { background: #6c8ef5; }
  .seg.tool { background: #3fb28f; }
+ .seg.inference.aut { background: #44416e; }
+ .seg.tool.aut { background: #2e5a50; }
  .seg.idle { background: #8a8f98; opacity: .5; }
  .seg.idle.carryover { opacity: .12; }
  .seg.idle.light { opacity: .25; }
@@ -95,7 +97,7 @@ const lday = t => { const d = new Date(t*1000); return d.getFullYear()+'-'+Strin
 
 const state = { month: null, day: null, session: null };
 let LAST_SIG = null;
-const filters = { sub: false, cron: false, oneshot: false, short: true };
+const filters = { sub: false, cron: false, oneshot: false, short: true, auto: true };
 let autoSelected = false;
 
 let _byDayCache = null, _byDaySig = null;
@@ -150,18 +152,22 @@ function passesFilters(s) {
 }
 
 function renderFilters() {
-  const n = { sub: 0, cron: 0, oneshot: 0, short: 0 };
+  const n = { sub: 0, cron: 0, oneshot: 0, short: 0, auto: 0 };
   for (const s of INDEX.sessions) {
     if (s.kind === 'sub') n.sub++;
     if (s.source === 'cron') n.cron++;
     if (s.source === 'oneshot') n.oneshot++;
     if ((s.t_end - s.t_start) < 300) n.short++;
   }
+  // sessions on the current day with autonomy-driven spans (heartbeat/refinement)
+  for (const s of (DAY[state.day] || [])) {
+    if ((s.spans || []).some(sp => sp.meta && sp.meta.driver)) n.auto++;
+  }
   const btn = (key, label) =>
     `<div class="fbtn ${filters[key] ? '' : 'off'}" data-f="${key}">${label} · ${n[key]}</div>`;
   $('#filters').innerHTML =
     btn('sub', '↳ subagents') + btn('cron', '⏰ cron') + btn('oneshot', '⚡ oneshots') +
-    btn('short', '&lt;5min sessions') +
+    btn('short', '&lt;5min sessions') + btn('auto', '🫀 autobeats') +
     `<span class="fsep">|</span><span style="color:#5d636d;font-size:12px">off = hidden</span>`;
   $('#filters').querySelectorAll('.fbtn').forEach(el => el.onclick = () => {
     filters[el.dataset.f] = !filters[el.dataset.f];
@@ -301,7 +307,9 @@ function renderDayView() {
       const segs = vis.map(({sp,a,b}, i) => {
         const carry = sp.kind === 'idle' && sp.t_start < day0 ? ' carryover' : '';
         const lite = sp.kind === 'idle' && !carry && light.has(i) ? ' light' : '';
-        return `<div class="seg ${sp.kind}${carry}${lite}" style="left:${(a-day0)/86400*100}%;width:${Math.max((b-a)/86400*100,0.05)}%"></div>`;
+        const aut = sp.meta && sp.meta.driver ? ' aut' : '';
+        if (aut && !filters.auto) return '';   // hidden: autonomy spans off
+        return `<div class="seg ${sp.kind}${carry}${lite}${aut}" style="left:${(a-day0)/86400*100}%;width:${Math.max((b-a)/86400*100,0.05)}%"></div>`;
       }).join('');
       rows += `<div class="lane ${s.kind==='sub'?'sub-row':''}" data-id="${encodeURIComponent(s.id)}">
         <span class="lbl ${s.kind==='sub'?'sub':''}${s.id.startsWith('prime:')?' prime':''}" title="${esc(s.title)}">${s.kind==='sub'?'↳ ':''}[${esc(s.profile||'?')}] ${esc(s.title)}</span>
@@ -332,13 +340,15 @@ function renderDayView() {
       // per-span tooltips: segs render 1:1 with sorted spans (skipped ones emit '')
       const segEls = el.querySelectorAll('.seg');
       const sorted = [...s.spans].sort((a,b)=>a.t_start-b.t_start);
-      const visible = sorted.filter(sp => Math.min(sp.t_end, day1) > Math.max(sp.t_start, day0));
+      const visible = sorted.filter(sp => Math.min(sp.t_end, day1) > Math.max(sp.t_start, day0))
+                           .filter(sp => filters.auto || !(sp.meta && sp.meta.driver));
       segEls.forEach((segEl, i) => {
         const sp = visible[i]; if (!sp) return;
         const m = sp.meta || {};
         const overnight = sp.kind==='idle' && sp.t_start < day0;
-        const title = sp.kind==='tool' ? (sp.label||'tool')
-          : sp.kind==='inference' ? 'model' : (overnight ? 'idle (overnight from ' + lday(sp.t_start) + ')' : 'idle');
+        const drv = (m.driver === 'heartbeat') ? ' · 🫀 heartbeat' : (m.driver === 'refinement') ? ' · ♻ refinement' : '';
+        const title = (sp.kind==='tool' ? (sp.label||'tool')
+          : sp.kind==='inference' ? 'model' : (overnight ? 'idle (overnight from ' + lday(sp.t_start) + ')' : 'idle')) + drv;
         const body = sp.kind==='tool' ? `args: ${(m.args||'').slice(0,140)}`
           : sp.kind==='inference' ? (m.output||'(tool-call only)').slice(0,140)
           : (m.next_user ? `you then said: ${(m.next_user||'').slice(0,140)}` : (m.note || ''));
@@ -350,7 +360,11 @@ function renderDayView() {
     });
   };
   if (DAY[state.day]) render();
-  else fetch('/api/day?date='+state.day).then(r=>r.json()).then(d => { DAY[state.day] = d.sessions; render(); });
+  else fetch('/api/day?date='+state.day).then(r=>r.json()).then(d => {
+    DAY[state.day] = d.sessions;
+    render();
+    renderFilters(); // autobeats count derives from day spans — refresh after load
+  });
 }
 
 function renderSessionView() {
